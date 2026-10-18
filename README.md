@@ -1,22 +1,51 @@
 <div align="center">
-  <img src="./assets/antigravity.png" alt="Antigravity Phone Connect" width="300">
-  <h1>Antigravity Phone Connect 📱</h1>
+  <img src="./assets/antigravity.png" alt="Antigravity-mobile" width="300">
+  <h1>Antigravity-mobile 📱</h1>
+  <p><b>随时随地在手机端监控与操控您的 Antigravity AI 编程会话</b></p>
 </div>
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-**Antigravity Phone Connect** is a high-performance, real-time mobile monitor and remote control for your Antigravity AI sessions. It allows you to step away from your desk while keeping full sight and control over your AI's thinking process and generations.
+> 📌 **项目溯源与致谢 (Fork Attribution)**
+> 
+> 本项目基于 **[krishnakanthb13/antigravity_phone_chat](https://github.com/krishnakanthb13/antigravity_phone_chat)** 进行二次开发与深度重构（原始灵感启发自 [gherghett/Antigravity-Shit-Chat](https://github.com/gherghett/Antigravity-Shit-Chat)）。
+> 针对最新版 **Google Antigravity (2.0)** 进行了架构升级、性能重构、体验打磨与移动端交互重塑。
 
-- **🚀 Lightning Fast Snapshots**: Sub-100ms mirroring of the Antigravity chat via Chrome DevTools Protocol (CDP).
-- **🛡️ Security First**: Built-in security audits, XSS protection via a strict Content Security Policy (No-Inline-JS), and encrypted session handling via signed `httpOnly` cookies.
-- **📱 Mobile-First History**: Access and switch conversation history from a sleek, full-screen mobile drawer with native-feel cards and micro-animations.
-- **🏠 One-Tap Connect**: Automatically trusts your local home Wi-Fi (LAN) for instant access, while maintaining a Zero-Trust policy with password protection for all external traffic.
+---
 
-![Antigravity Phone Connect](./assets/release_generic-1.png)
+## 🌟 核心功能升级 (Major Enhancements)
 
-![Antigravity Phone Connect](./assets/global_access_hero_2.png)
+相比原上游项目，**Antigravity-mobile** 带来了以下重大升级与修复：
 
-**Note:** This project is a refined fork/extension based on the original [Antigravity Shit-Chat](https://github.com/gherghett/Antigravity-Shit-Chat) by gherghett.
+### 1. ⚡ 无感平滑渲染与彻底防闪烁 (MorphDOM In-place Reconciliation)
+* **告别白屏重绘**：使用轻量化 DOM 局部比对算法（In-place morphing）替换了全量清空 `innerHTML` 的暴力渲染机制。
+* **零频闪阅读**：彻底解决原版每隔几秒刷新一次导致的屏幕白光闪烁、图片重复重载与重排卡顿，多轮长对话依然丝滑。
+
+### 2. 🎯 智能滚动视口锁定 (Smart Scroll Lock & Jitter-Free)
+* **翻阅历史不跳动**：智能判断用户交互状态，向上翻阅历史代码或消息时强制锁定当前可视区域，绝不强制拉回底部。
+* **平滑流式跟随**：仅当用户处于页面底部且大模型正在生成新内容时，才会轻柔跟进最新文字。
+
+### 3. 🎨 样式特征缓存与暗色模式优化 (Cached Style & Dark Theme)
+* **样式性能大幅提升**：加入 CSS 哈希比较机制，杜绝每次轮询重复将 50KB+ 的样式表挂载进 DOM。
+* **高对比度移动端适配**：深度美化代码块高亮、引用胶囊、文件提及组件，内置便捷的移动端一键复制代码功能。
+
+### 4. 🌐 一键安全外网穿透与免密扫码 (Cloudflare Zero-Trust Tunnel)
+* **免除公网 IP**：弃用容易崩溃的旧版隧道，全自动集成开箱即用的 Ephemeral Cloudflare 隧道。
+* **扫码即连 (Magic QR)**：终端生成带安全 Token 的 Magic QR Code，手机扫码即可直接免密进入，无需手动配置路由器或输入长密码。
+
+### 5. 🗂️ 全面对齐 Antigravity 2.0 桌面端会话分组 (Desktop Grouping Parity)
+* **对齐桌面端侧边栏**：不再是杂乱无序的平铺列表，而是完美呈现 Antigravity 2.0 的三层会话体系：
+  * 📌 **Pinned**：置顶会话固定在最上方。
+  * 📁 **Projects**：按具体工作区 / 项目文件夹（如 `SnapSave`、`gyrosApp` 等）折叠分组展示，支持项目会话折叠/展开与角标统计。
+  * 💬 **Conversations**：集中呈现未绑定项目的全局或独立会话。
+
+### 6. 🔄 坚如磐石的会话无缝切换 (Robust Session Switcher)
+* **精准路由触发**：深入匹配 Antigravity 侧边栏内层 `<a href="/c/...">` 路由锚点与完整的鼠标指针事件流。
+* **消除按键竞态**：消除了手机抽屉关闭时广播 `Escape` 键对桌面端弹窗的竞争打断；结合长文本语义分词与 React 原生事件，会话切换 100% 成功率。
+
+### 7. 🚀 启动环境自愈与僵尸进程清理 (Self-Healing Launcher)
+* **本地虚拟环境优先**：批处理文件智能锁定项目内部 Python 虚拟环境，杜绝外部 Conda 依赖冲突或 PyPI 下载卡死。
+* **端口冲突自愈**：每次启动自动排查并清理残留的孤儿进程，确保 3000 端口即点即用。
 
 ---
 

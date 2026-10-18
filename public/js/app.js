@@ -69,10 +69,10 @@ async function fetchAppState() {
         const res = await fetchWithAuth('/app-state');
         const data = await res.json();
 
-        // Mode Sync (Fast/Planning) - Desktop is source of truth
+        // Mode Sync (Turbo/Default/Request Review/Fast/Planning) - Desktop is source of truth
         if (data.mode && data.mode !== 'Unknown') {
             modeText.textContent = data.mode;
-            modeBtn.classList.toggle('active', data.mode === 'Planning');
+            modeBtn.classList.toggle('active', data.mode === 'Turbo' || data.mode === 'Planning');
             currentMode = data.mode;
         }
 
@@ -136,12 +136,12 @@ function dismissSslBanner() {
 checkSslStatus();
 // --- Models ---
 const MODELS = [
-    "Gemini 3.1 Pro (High)",
-    "Gemini 3.1 Pro (Low)",
-    "Gemini 3 Flash",
+    "Gemini 3.8 Flash High",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking)",
-    "GPT-OSS 120B (Medium)"
+    "GPT-OSS 120B (Medium)",
+    "Gemini 3.1 Pro (High)",
+    "Gemini 3 Flash"
 ];
 
 // --- WebSocket ---
@@ -155,6 +155,7 @@ function connectWebSocket() {
         loadSnapshot();
     };
 
+    let snapshotDebounce = null;
     ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'error' && data.message === 'Unauthorized') {
@@ -162,7 +163,10 @@ function connectWebSocket() {
             return;
         }
         if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
-            loadSnapshot();
+            if (snapshotDebounce) clearTimeout(snapshotDebounce);
+            snapshotDebounce = setTimeout(() => {
+                loadSnapshot(false);
+            }, 80);
         }
     };
 
@@ -185,14 +189,77 @@ function updateStatus(connected) {
     }
 }
 
+// --- High-Performance DOM Morphing (Zero-flicker reconciliation) ---
+function morphDOM(oldRoot, newRoot) {
+    // 1. Attribute syncing
+    const oldAttrs = oldRoot.attributes;
+    const newAttrs = newRoot.attributes;
+
+    if (oldAttrs && newAttrs) {
+        for (let i = oldAttrs.length - 1; i >= 0; i--) {
+            const name = oldAttrs[i].name;
+            if (!newRoot.hasAttribute(name) && !name.startsWith('data-client-')) {
+                oldRoot.removeAttribute(name);
+            }
+        }
+        for (let i = 0; i < newAttrs.length; i++) {
+            const name = newAttrs[i].name;
+            const val = newAttrs[i].value;
+            if (oldRoot.getAttribute(name) !== val) {
+                oldRoot.setAttribute(name, val);
+            }
+        }
+    }
+
+    // 2. Children syncing (preserving client-injected copy buttons)
+    const oldChildren = Array.from(oldRoot.childNodes).filter(
+        n => !(n.nodeType === Node.ELEMENT_NODE && n.classList.contains('mobile-copy-btn'))
+    );
+    const newChildren = Array.from(newRoot.childNodes);
+
+    const oldLen = oldChildren.length;
+    const newLen = newChildren.length;
+    const maxLen = Math.max(oldLen, newLen);
+
+    for (let i = 0; i < maxLen; i++) {
+        const oldChild = oldChildren[i];
+        const newChild = newChildren[i];
+
+        if (!oldChild && newChild) {
+            oldRoot.appendChild(newChild.cloneNode(true));
+        } else if (oldChild && !newChild) {
+            if (oldChild.parentNode === oldRoot) {
+                oldRoot.removeChild(oldChild);
+            }
+        } else if (oldChild.nodeType === Node.TEXT_NODE && newChild.nodeType === Node.TEXT_NODE) {
+            if (oldChild.nodeValue !== newChild.nodeValue) {
+                oldChild.nodeValue = newChild.nodeValue;
+            }
+        } else if (
+            oldChild.nodeType === Node.ELEMENT_NODE &&
+            newChild.nodeType === Node.ELEMENT_NODE &&
+            oldChild.tagName === newChild.tagName
+        ) {
+            morphDOM(oldChild, newChild);
+        } else {
+            if (oldChild.parentNode === oldRoot) {
+                oldRoot.replaceChild(newChild.cloneNode(true), oldChild);
+            }
+        }
+    }
+}
+
 // --- Rendering ---
-async function loadSnapshot() {
+async function loadSnapshot(isManual = false) {
     try {
-        // Add spin animation to refresh button
-        const icon = refreshBtn.querySelector('svg');
-        icon.classList.remove('spin-anim');
-        void icon.offsetWidth; // trigger reflow
-        icon.classList.add('spin-anim');
+        if (isManual) {
+            const icon = refreshBtn.querySelector('svg');
+            if (icon) {
+                icon.classList.remove('spin-anim');
+                void icon.offsetWidth; // trigger reflow
+                icon.classList.add('spin-anim');
+            }
+        }
 
         const response = await fetchWithAuth('/snapshot');
         if (!response.ok) {
@@ -233,211 +300,348 @@ async function loadSnapshot() {
             document.head.appendChild(styleTag);
         }
 
-        const darkModeOverrides = '/* --- BASE SNAPSHOT CSS --- */\n' +
-            data.css +
-            '\n\n/* --- FORCE DARK MODE OVERRIDES --- */\n' +
-            ':root {\n' +
-            '    --bg-app: #0f172a;\n' +
-            '    --text-main: #f8fafc;\n' +
-            '    --text-muted: #94a3b8;\n' +
-            '    --border-color: #334155;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation, #chat, #cascade {\n' +
-            '    background-color: transparent !important;\n' +
-            '    color: var(--text-main) !important;\n' +
-            '    font-family: \'Inter\', system-ui, sans-serif !important;\n' +
-            '    position: relative !important;\n' +
-            '    height: auto !important;\n' +
-            '    width: 100% !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Fix stacking BUT preserve absolute/fixed positioning for dropdowns */\n' +
-            '#conversation > div, #chat > div, #cascade > div {\n' +
-            '    position: static !important;\n' +
-            '}\n' +
-            '/* Preserve absolute positioning needed for dropdowns, tooltips, popups */\n' +
-            '[style*="position: absolute"], [style*="position: fixed"],\n' +
-            '[data-headlessui-state], [id*="headlessui"] {\n' +
-            '    position: absolute !important;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation p, #chat p, #cascade p, #conversation h1, #chat h1, #cascade h1, #conversation h2, #chat h2, #cascade h2, #conversation h3, #chat h3, #cascade h3, #conversation h4, #chat h4, #cascade h4, #conversation h5, #chat h5, #cascade h5, #conversation span, #chat span, #cascade span, #conversation div, #chat div, #cascade div, #conversation li, #chat li, #cascade li {\n' +
-            '    color: inherit !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Force black inline text to white */\n' +
-            '[style*="color: rgb(0, 0, 0)"], [style*="color: black"],\n' +
-            '[style*="color:#000"], [style*="color: #000"] {\n' +
-            '    color: #e2e8f0 !important;\n' +
-            '}\n' +
-            '\n' +
-            '#conversation a, #chat a, #cascade a {\n' +
-            '    color: #60a5fa !important;\n' +
-            '    text-decoration: underline;\n' +
-            '}\n' +
-            '\n' +
-            '/* Hide broken local file icons (served from /c:/Users/... paths) */\n' +
-            'img[src^="/c:"], img[src^="/C:"], img[src*="AppData"] {\n' +
-            '    display: none !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Override Tailwind default block display for embedded file icons */\n' +
-            'img, svg {\n' +
-            '    display: inline !important;\n' +
-            '    vertical-align: middle !important;\n' +
-            '}\n' +
-            '/* Force file-reference wrappers (icon + filename) to stay inline */\n' +
-            'div:has(> img[src^="data:"]), div:has(> img[alt]), span:has(> img) {\n' +
-            '    display: inline !important;\n' +
-            '    vertical-align: middle !important;\n' +
-            '}\n' +
-            '/* Inline-flex containers from Antigravity (e.g. file mentions) */\n' +
-            '[class*="inline-flex"], [class*="inline-block"], [class*="items-center"]:has(img) {\n' +
-            '    display: inline-flex !important;\n' +
-            '    vertical-align: middle !important;\n' +
-            '}\n' +
-            '\n' +
-            '/* Fix Inline Code - Ultra-compact */\n' +
-            ':not(pre) > code {\n' +
-            '    padding: 0px 2px !important;\n' +
-            '    border-radius: 2px !important;\n' +
-            '    background-color: rgba(255, 255, 255, 0.1) !important;\n' +
-            '    font-size: 0.82em !important;\n' +
-            '    line-height: 1 !important;\n' +
-            '    white-space: normal !important;\n' +
-            '}\n' +
-            '\n' +
-            'pre, code, .monaco-editor-background, [class*="terminal"] {\n' +
-            '    background-color: #1e293b !important;\n' +
-            '    color: #e2e8f0 !important;\n' +
-            '    font-family: \'JetBrains Mono\', monospace !important;\n' +
-            '    border-radius: 3px;\n' +
-            '    border: 1px solid #334155;\n' +
-            '}\n' +
-            '                \n' +
-            '/* Multi-line Code Block - Minimal */\n' +
-            'pre {\n' +
-            '    position: relative !important;\n' +
-            '    white-space: pre-wrap !important; \n' +
-            '    word-break: break-word !important;\n' +
-            '    padding: 4px 6px !important;\n' +
-            '    margin: 2px 0 !important;\n' +
-            '    display: block !important;\n' +
-            '    width: 100% !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre.has-copy-btn {\n' +
-            '    padding-right: 28px !important;\n' +
-            '}\n' +
-            '                \n' +
-            '/* Single-line Code Block - Minimal */\n' +
-            'pre.single-line-pre {\n' +
-            '    display: inline-block !important;\n' +
-            '    width: auto !important;\n' +
-            '    max-width: 100% !important;\n' +
-            '    padding: 0px 4px !important;\n' +
-            '    margin: 0px !important;\n' +
-            '    vertical-align: middle !important;\n' +
-            '    background-color: #1e293b !important;\n' +
-            '    font-size: 0.85em !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre.single-line-pre > code {\n' +
-            '    display: inline !important;\n' +
-            '    white-space: nowrap !important;\n' +
-            '}\n' +
-            '                \n' +
-            'pre:not(.single-line-pre) > code {\n' +
-            '    display: block !important;\n' +
-            '    width: 100% !important;\n' +
-            '    overflow-x: auto !important;\n' +
-            '    background: transparent !important;\n' +
-            '    border: none !important;\n' +
-            '    padding: 0 !important;\n' +
-            '    margin: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn {\n' +
-            '    position: absolute !important;\n' +
-            '    top: 2px !important;\n' +
-            '    right: 2px !important;\n' +
-            '    background: rgba(30, 41, 59, 0.5) !important;\n' +
-            '    color: #94a3b8 !important;\n' +
-            '    border: none !important;\n' +
-            '    width: 24px !important; \n' +
-            '    height: 24px !important;\n' +
-            '    padding: 0 !important;\n' +
-            '    cursor: pointer !important;\n' +
-            '    display: flex !important;\n' +
-            '    align-items: center !important;\n' +
-            '    justify-content: center !important;\n' +
-            '    border-radius: 4px !important;\n' +
-            '    transition: all 0.2s ease !important;\n' +
-            '    -webkit-tap-highlight-color: transparent !important;\n' +
-            '    z-index: 10 !important;\n' +
-            '    margin: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn:hover,\n' +
-            '.mobile-copy-btn:focus {\n' +
-            '    background: rgba(59, 130, 246, 0.2) !important;\n' +
-            '    color: #60a5fa !important;\n' +
-            '}\n' +
-            '                \n' +
-            '.mobile-copy-btn svg {\n' +
-            '    width: 16px !important;\n' +
-            '    height: 16px !important;\n' +
-            '    stroke: currentColor !important;\n' +
-            '    stroke-width: 2 !important;\n' +
-            '    fill: none !important;\n' +
-            '}\n' +
-            '                \n' +
-            'blockquote {\n' +
-            '    border-left: 3px solid #3b82f6 !important;\n' +
-            '    background: rgba(59, 130, 246, 0.1) !important;\n' +
-            '    color: #cbd5e1 !important;\n' +
-            '    padding: 8px 12px !important;\n' +
-            '    margin: 8px 0 !important;\n' +
-            '}\n' +
-            '\n' +
-            'table {\n' +
-            '    border-collapse: collapse !important;\n' +
-            '    width: 100% !important;\n' +
-            '    border: 1px solid #334155 !important;\n' +
-            '}\n' +
-            'th, td {\n' +
-            '    border: 1px solid #334155 !important;\n' +
-            '    padding: 8px !important;\n' +
-            '    color: #e2e8f0 !important;\n' +
-            '}\n' +
-            '\n' +
-            '::-webkit-scrollbar {\n' +
-            '    width: 0 !important;\n' +
-            '}\n' +
-            '                \n' +
-            '[style*="background-color: rgb(255, 255, 255)"],\n' +
-            '[style*="background-color: white"],\n' +
-            '[style*="background: white"] {\n' +
-            '    background-color: transparent !important;\n' +
-            '}';
-        styleTag.textContent = darkModeOverrides;
-        chatContent.innerHTML = data.html;
+        const darkModeOverrides = `/* --- BASE SNAPSHOT CSS --- */
+${data.css}
 
+/* --- FORCE DARK MODE & HIGH-CONTRAST OVERRIDES --- */
+:root, body, #chatContent, #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
+    --bg-app: #090e17 !important;
+    --text-main: #f8fafc !important;
+    --text-muted: #94a3b8 !important;
+    --border-color: #334155 !important;
+    --background: #090e17 !important;
+    --foreground: #f8fafc !important;
+    --card: #131c2f !important;
+    --card-foreground: #f8fafc !important;
+    --card-border: #1e293b !important;
+    --secondary: #1e293b !important;
+    --secondary-foreground: #e2e8f0 !important;
+    --muted: #131c2f !important;
+    --muted-foreground: #94a3b8 !important;
+    --border: rgba(255, 255, 255, 0.12) !important;
+    --primary: #6366f1 !important;
+    --primary-foreground: #ffffff !important;
+    --accent: #6366f1 !important;
+    --accent-foreground: #ffffff !important;
+    --popover: #131c2f !important;
+    --popover-foreground: #f8fafc !important;
+    --max-conversation-width: 100% !important;
+    color: #f8fafc !important;
+}
+
+/* Prevent 0px collapse from container queries & flex parents */
+#conversation,
+.antigravity-snapshot-root,
+[data-testid="autoscroll-viewport"],
+#chatContent,
+#conversation * {
+    container-type: normal !important;
+}
+
+#conversation,
+.antigravity-snapshot-root,
+[data-testid="autoscroll-viewport"] {
+    background-color: transparent !important;
+    color: #f8fafc !important;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    position: relative !important;
+    height: auto !important;
+    min-height: 100% !important;
+    max-height: none !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+    display: block !important;
+    padding-right: 0px !important;
+}
+
+#conversation > div,
+.antigravity-snapshot-root > div {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 100% !important;
+    overflow: visible !important;
+    position: static !important;
+}
+
+/* Force high contrast text on all elements */
+#conversation p,
+#conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation h5,
+#conversation li, #conversation td, #conversation th,
+#conversation label, #conversation blockquote {
+    color: #f8fafc !important;
+    font-size: 15px;
+    line-height: 1.6;
+}
+
+#conversation [class*="text-foreground"] {
+    color: #f8fafc !important;
+}
+
+#conversation [class*="text-muted-foreground"] {
+    color: #94a3b8 !important;
+}
+
+#conversation [class*="text-secondary-foreground"] {
+    color: #cbd5e1 !important;
+}
+
+/* Force black / dark gray inline text to white */
+[style*="color: rgb(0, 0, 0)"], [style*="color: black"],
+[style*="color:#000"], [style*="color: #000"],
+[style*="color: rgb(16, 16, 16)"] {
+    color: #f8fafc !important;
+}
+
+#conversation a {
+    color: #60a5fa !important;
+    text-decoration: underline;
+}
+
+/* User Message styling (prompt sent by user) */
+#conversation div[class*="bg-background"],
+#conversation [class*="md-sticky-message-bleed"] {
+    background: #1e293b !important;
+    color: #f8fafc !important;
+    border-radius: 12px !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    padding: 10px 14px !important;
+    margin: 10px 0 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+}
+#conversation div[class*="bg-background"]::after {
+    display: none !important;
+}
+
+/* Assistant Message Area */
+#conversation [role="article"] {
+    background: transparent !important;
+    color: #f8fafc !important;
+    width: 100% !important;
+}
+
+/* Thought collapsible cards ("Worked for 13s", "Thinking...") */
+#conversation [data-testid="worked-for-collapsible"],
+#conversation button[class*="tabular-nums"],
+#conversation button:has(svg):has(span) {
+    background: rgba(255, 255, 255, 0.07) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    border-radius: 8px !important;
+    color: #f8fafc !important;
+    padding: 8px 12px !important;
+    margin: 6px 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+}
+#conversation [data-testid="worked-for-collapsible"]:hover,
+#conversation [data-testid="worked-for-collapsible"]:active {
+    background: rgba(255, 255, 255, 0.14) !important;
+}
+#conversation [data-testid="worked-for-collapsible"] span,
+#conversation button[class*="tabular-nums"] span {
+    color: #cbd5e1 !important;
+    font-weight: 500 !important;
+}
+#conversation [data-testid="worked-for-collapsible"] svg {
+    color: #94a3b8 !important;
+}
+
+/* Action and Control buttons inside conversation */
+#conversation button,
+#conversation [role="button"] {
+    color: #f8fafc !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    border-radius: 6px !important;
+    padding: 6px 12px !important;
+}
+#conversation button:hover,
+#conversation [role="button"]:hover {
+    background: rgba(255, 255, 255, 0.15) !important;
+}
+#conversation button svg,
+#conversation [role="button"] svg {
+    color: #e2e8f0 !important;
+    stroke: currentColor !important;
+}
+
+/* Action bar buttons: Allow, Confirm, Run, Deny */
+#conversation button:where([class*="allow"], [class*="confirm"], [class*="run"]) {
+    background: #2563eb !important;
+    color: #ffffff !important;
+    border: 1px solid #3b82f6 !important;
+    font-weight: 600 !important;
+}
+#conversation button:where([class*="deny"], [class*="reject"]) {
+    background: #dc2626 !important;
+    color: #ffffff !important;
+    border: 1px solid #ef4444 !important;
+    font-weight: 600 !important;
+}
+
+/* Preserve absolute positioning needed for dropdowns, tooltips, popups */
+[style*="position: absolute"], [style*="position: fixed"],
+[data-headlessui-state], [id*="headlessui"] {
+    position: absolute !important;
+}
+
+/* Hide broken local file icons */
+img[src^="/c:"], img[src^="/C:"], img[src*="AppData"] {
+    display: none !important;
+}
+
+img, svg {
+    display: inline !important;
+    vertical-align: middle !important;
+}
+
+/* Inline flex items like file mentions */
+[class*="inline-flex"], [class*="inline-block"], [class*="items-center"]:has(img) {
+    display: inline-flex !important;
+    vertical-align: middle !important;
+}
+
+/* Code blocks */
+:not(pre) > code {
+    padding: 2px 6px !important;
+    border-radius: 4px !important;
+    background-color: rgba(255, 255, 255, 0.12) !important;
+    color: #93c5fd !important;
+    font-size: 0.88em !important;
+    line-height: 1.2 !important;
+    white-space: normal !important;
+}
+
+pre, code, .monaco-editor-background, [class*="terminal"] {
+    background-color: #111827 !important;
+    color: #e2e8f0 !important;
+    font-family: 'JetBrains Mono', Consolas, monospace !important;
+    border-radius: 6px;
+    border: 1px solid #1f2937;
+}
+
+pre {
+    position: relative !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    padding: 8px 10px !important;
+    margin: 6px 0 !important;
+    display: block !important;
+    width: 100% !important;
+}
+
+pre.has-copy-btn {
+    padding-right: 32px !important;
+}
+
+pre.single-line-pre {
+    display: inline-block !important;
+    width: auto !important;
+    max-width: 100% !important;
+    padding: 2px 6px !important;
+    margin: 0px !important;
+    vertical-align: middle !important;
+    background-color: #111827 !important;
+    font-size: 0.88em !important;
+}
+
+pre.single-line-pre > code {
+    display: inline !important;
+    white-space: nowrap !important;
+}
+
+pre:not(.single-line-pre) > code {
+    display: block !important;
+    width: 100% !important;
+    overflow-x: auto !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+.mobile-copy-btn {
+    position: absolute !important;
+    top: 4px !important;
+    right: 4px !important;
+    background: rgba(30, 41, 59, 0.8) !important;
+    color: #94a3b8 !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    width: 26px !important;
+    height: 26px !important;
+    padding: 0 !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 4px !important;
+    z-index: 10 !important;
+}
+
+blockquote {
+    border-left: 3px solid #3b82f6 !important;
+    background: rgba(59, 130, 246, 0.1) !important;
+    color: #cbd5e1 !important;
+    padding: 8px 12px !important;
+    margin: 8px 0 !important;
+    border-radius: 0 6px 6px 0 !important;
+}
+
+table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+    border: 1px solid #334155 !important;
+    margin: 8px 0 !important;
+}
+th, td {
+    border: 1px solid #334155 !important;
+    padding: 8px !important;
+    color: #e2e8f0 !important;
+}
+
+::-webkit-scrollbar {
+    width: 0 !important;
+}
+
+[style*="background-color: rgb(255, 255, 255)"],
+[style*="background-color: white"],
+[style*="background: white"] {
+    background-color: transparent !important;
+}`;
+        if (styleTag.dataset.rawCss !== data.css) {
+            styleTag.dataset.rawCss = data.css;
+            styleTag.textContent = darkModeOverrides;
+        }
+
+        const wasEmpty = !chatContent.firstElementChild || 
+                         chatContent.querySelector('.empty-state') || 
+                         chatContent.querySelector('.loading-state');
+
+        if (wasEmpty) {
+            chatContent.innerHTML = data.html;
+        } else {
+            const temp = document.createElement('div');
+            temp.innerHTML = data.html;
+            morphDOM(chatContent, temp);
+        }
 
         // Add mobile copy buttons to all code blocks
         addMobileCopyButtons();
 
-        // Smart scroll behavior: respect user scroll, only auto-scroll when appropriate
+        // Smart scroll behavior: prevent stuttering / flicker
+        const newScrollHeight = chatContainer.scrollHeight;
         if (isUserScrollLocked) {
-            // User recently scrolled - try to maintain their approximate position
-            // Use percentage-based restoration for better accuracy
             const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
-            const newScrollPos = chatContainer.scrollHeight * scrollPercent;
-            chatContainer.scrollTop = newScrollPos;
+            chatContainer.scrollTop = newScrollHeight * scrollPercent;
         } else if (isNearBottom || scrollPos === 0) {
-            // User was at bottom or hasn't scrolled - auto scroll to bottom
-            scrollToBottom();
+            // Only auto-scroll down if content actually grew
+            if (newScrollHeight > scrollHeight || scrollPos === 0) {
+                chatContainer.scrollTop = newScrollHeight;
+            }
         } else {
             // Preserve exact scroll position
             chatContainer.scrollTop = scrollPos;
@@ -664,7 +868,7 @@ sendBtn.addEventListener('click', sendMessage);
 
 refreshBtn.addEventListener('click', () => {
     // Refresh both Chat and State (Mode/Model)
-    loadSnapshot();
+    loadSnapshot(true);
     fetchAppState(); // PRIORITY: Sync from Desktop
 });
 
@@ -877,6 +1081,52 @@ async function showChatHistory() {
             return;
         }
 
+        // Partition chats into groups matching desktop Antigravity
+        const pinnedChats = [];
+        const projectChatsMap = new Map(); // workspaceName -> [chats]
+        const conversationChats = [];
+
+        chats.forEach(chat => {
+            if (chat.isPinned || chat.group === 'Pinned') {
+                pinnedChats.push(chat);
+            } else if (chat.group === 'Projects' || (chat.workspace && chat.workspace.trim().length > 0)) {
+                const ws = chat.workspace ? chat.workspace.trim() : 'Project';
+                if (!projectChatsMap.has(ws)) {
+                    projectChatsMap.set(ws, []);
+                }
+                projectChatsMap.get(ws).push(chat);
+            } else {
+                conversationChats.push(chat);
+            }
+        });
+
+        const renderCard = (chat) => {
+            const safeTitle = chat.title.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const safeWorkspace = (chat.workspace || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            return `
+                <div class="history-card ${chat.isActive ? 'active' : ''}" data-title="${safeTitle}" data-workspace="${safeWorkspace}">
+                    <div class="history-card-icon">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                    </div>
+                    <div class="history-card-content">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span class="history-card-title">${escapeHtml(chat.title)}</span>
+                            ${chat.isActive ? '<span class="history-active-badge">当前</span>' : ''}
+                        </div>
+                        ${chat.workspace ? `<span class="history-card-workspace">📁 ${escapeHtml(chat.workspace)}</span>` : ''}
+                    </div>
+                    ${chat.timestamp ? `<span class="history-card-time">${escapeHtml(chat.timestamp)}</span>` : ''}
+                    <div class="history-card-arrow">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>
+                    </div>
+                </div>
+            `;
+        };
+
         // Render chats
         let html = `
             <div class="history-action-container">
@@ -888,33 +1138,159 @@ async function showChatHistory() {
                     New Conversation
                 </button>
             </div>
-            <div class="history-list-group">
+            <div class="history-search-bar">
+                <div class="history-search-icon">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </div>
+                <input type="text" class="history-search-input" id="historySearchInput" placeholder="Search conversations (${chats.length})...">
+            </div>
+            <div class="history-list-group" id="historyListGroup">
         `;
 
-        chats.forEach(chat => {
-            const safeTitle = chat.title.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        // 1. PINNED SECTION
+        if (pinnedChats.length > 0) {
             html += `
-                <div class="history-card" data-title="${safeTitle}">
-                    <div class="history-card-icon">
-                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                        </svg>
+                <div class="history-section" data-section="pinned">
+                    <div class="history-section-header">
+                        <span class="history-section-title">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="17" x2="12" y2="22"></line>
+                                <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
+                            </svg>
+                            Pinned
+                        </span>
+                        <span class="history-section-count">${pinnedChats.length}</span>
                     </div>
-                    <div class="history-card-content">
-                        <span class="history-card-title">${escapeHtml(chat.title)}</span>
-                    </div>
-                    <div class="history-card-arrow">
-                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="9 18 15 12 9 6"></polyline>
-                        </svg>
+                    <div class="history-section-items" style="display:flex; flex-direction:column; gap:8px;">
+                        ${pinnedChats.map(renderCard).join('')}
                     </div>
                 </div>
             `;
-        });
+        }
 
+        // 2. PROJECTS SECTION (Grouped by workspace folders)
+        if (projectChatsMap.size > 0) {
+            let totalProjectChats = 0;
+            projectChatsMap.forEach(arr => totalProjectChats += arr.length);
+
+            html += `
+                <div class="history-section" data-section="projects">
+                    <div class="history-section-header">
+                        <span class="history-section-title">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            Projects
+                        </span>
+                        <span class="history-section-count">${totalProjectChats}</span>
+                    </div>
+            `;
+
+            // Sort projects: project with active chat first, then alphabetical
+            const sortedProjects = Array.from(projectChatsMap.entries()).sort((a, b) => {
+                const aHasActive = a[1].some(c => c.isActive);
+                const bHasActive = b[1].some(c => c.isActive);
+                if (aHasActive && !bHasActive) return -1;
+                if (!aHasActive && bHasActive) return 1;
+                return a[0].localeCompare(b[0]);
+            });
+
+            for (const [workspaceName, pChats] of sortedProjects) {
+                html += `
+                    <div class="history-project-group" data-project="${escapeHtml(workspaceName)}">
+                        <div class="history-project-header">
+                            <div class="history-project-title-wrapper">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                </svg>
+                                <span>${escapeHtml(workspaceName)}</span>
+                            </div>
+                            <div class="history-project-meta">
+                                <span class="history-project-badge">${pChats.length}</span>
+                                <div class="history-project-toggle">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="6 9 12 15 18 9"></polyline>
+                                    </svg>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="history-project-items">
+                            ${pChats.map(renderCard).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `</div>`;
+        }
+
+        // 3. CONVERSATIONS SECTION (General / Standalone)
+        if (conversationChats.length > 0) {
+            html += `
+                <div class="history-section" data-section="conversations">
+                    <div class="history-section-header">
+                        <span class="history-section-title">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            Conversations
+                        </span>
+                        <span class="history-section-count">${conversationChats.length}</span>
+                    </div>
+                    <div class="history-section-items" style="display:flex; flex-direction:column; gap:8px;">
+                        ${conversationChats.map(renderCard).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        html += `<div class="history-empty-search" id="historyEmptySearch" style="display:none;">No matching conversations found</div>`;
         html += `</div>`;
 
         historyList.innerHTML = html;
+
+        // Add client-side instant search filter
+        const searchInput = document.getElementById('historySearchInput');
+        const emptyNotice = document.getElementById('historyEmptySearch');
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                const query = e.target.value.trim().toLowerCase();
+                let totalVisible = 0;
+
+                const cards = document.querySelectorAll('.history-card');
+                cards.forEach(card => {
+                    const titleText = (card.getAttribute('data-title') || '').toLowerCase();
+                    const wsText = (card.getAttribute('data-workspace') || '').toLowerCase();
+                    const matches = titleText.includes(query) || wsText.includes(query);
+                    card.style.display = matches ? 'flex' : 'none';
+                    if (matches) totalVisible++;
+                });
+
+                // Update project groups visibility
+                const projectGroups = document.querySelectorAll('.history-project-group');
+                projectGroups.forEach(group => {
+                    const visibleInGroup = group.querySelectorAll('.history-card:not([style*="display: none"])').length;
+                    group.style.display = visibleInGroup > 0 ? 'flex' : 'none';
+                    if (query.length > 0 && visibleInGroup > 0) {
+                        group.classList.remove('collapsed');
+                    }
+                });
+
+                // Update section headers visibility
+                const sections = document.querySelectorAll('.history-section');
+                sections.forEach(sec => {
+                    const visibleInSec = sec.querySelectorAll('.history-card:not([style*="display: none"])').length;
+                    sec.style.display = visibleInSec > 0 ? 'flex' : 'none';
+                });
+
+                if (emptyNotice) {
+                    emptyNotice.style.display = (totalVisible === 0 && query.length > 0) ? 'block' : 'none';
+                }
+            });
+        }
 
     } catch (e) {
         historyList.innerHTML = `
@@ -930,20 +1306,22 @@ async function showChatHistory() {
 
 function hideChatHistory() {
     historyLayer.classList.remove('show');
-    // Send an escape key to Antigravity to close the History panel
-    try {
-        fetchWithAuth('/close-history', { method: 'POST' });
-    } catch (e) {
-        console.error('Failed to close history on desktop:', e);
-    }
 }
 
 historyBtn.addEventListener('click', showChatHistory);
 
 // --- Select Chat from History ---
 async function selectChat(title) {
+    if (!title) return;
+    
     // Visual reset while desktop switches conversation
-    chatContent.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Switching Conversation...</p></div>';
+    chatContent.innerHTML = `
+        <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p style="font-size:16px; font-weight:600; margin-top:12px; color:var(--text-main);">正在切换会话...</p>
+            <p style="font-size:13px; color:var(--text-muted); max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:4px;">${escapeHtml(title)}</p>
+        </div>
+    `;
 
     try {
         const res = await fetchWithAuth('/select-chat', {
@@ -954,20 +1332,20 @@ async function selectChat(title) {
         const data = await res.json();
 
         if (data.success) {
-            // Persistent polling to catch delayed desktop render/update
-            let attempts = 0;
-            const poll = setInterval(async () => {
-                await loadSnapshot();
-                attempts++;
-                if (attempts > 10) clearInterval(poll);
-            }, 500);
+            // Rapid polling to catch desktop navigation and render
+            setTimeout(loadSnapshot, 300);
+            setTimeout(loadSnapshot, 800);
+            setTimeout(loadSnapshot, 1600);
+            setTimeout(loadSnapshot, 3000);
         } else {
             console.error('Failed to select chat:', data.error);
-            setTimeout(loadSnapshot, 500);
+            alert(`切换会话失败: ${data.error || '未能定位到该会话'}`);
+            loadSnapshot();
         }
     } catch (e) {
         console.error('Select chat error:', e);
-        setTimeout(loadSnapshot, 500);
+        alert('切换会话请求失败，请检查网络连接');
+        loadSnapshot();
     }
 }
 
@@ -1039,7 +1417,7 @@ modalOverlay.onclick = (e) => {
 };
 
 modeBtn.addEventListener('click', () => {
-    openModal('Select Mode', ['Fast', 'Planning'], async (mode) => {
+    openModal('Select Mode', ['Turbo', 'Default', 'Request Review', 'Fast', 'Planning'], async (mode) => {
         modeText.textContent = 'Setting...';
         try {
             const res = await fetchWithAuth('/set-mode', {
@@ -1051,7 +1429,7 @@ modeBtn.addEventListener('click', () => {
             if (data.success) {
                 currentMode = mode;
                 modeText.textContent = mode;
-                modeBtn.classList.toggle('active', mode === 'Planning');
+                modeBtn.classList.toggle('active', mode === 'Turbo' || mode === 'Planning');
             } else {
                 alert('Error: ' + (data.error || 'Unknown'));
                 modeText.textContent = currentMode;
@@ -1251,6 +1629,15 @@ quickActionChips.forEach(chip => {
 // Delegation for dynamic history items
 if (historyList) {
     historyList.addEventListener('click', (e) => {
+        const projectHeader = e.target.closest('.history-project-header');
+        if (projectHeader) {
+            const group = projectHeader.closest('.history-project-group');
+            if (group) {
+                group.classList.toggle('collapsed');
+            }
+            return;
+        }
+
         const newBtn = e.target.closest('.history-new-btn');
         const card = e.target.closest('.history-card');
         

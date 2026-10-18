@@ -8,21 +8,27 @@ import socket
 import argparse
 import logging
 
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # -----------------------------------------------------------------------------
 # Dependency Management
 # -----------------------------------------------------------------------------
 def check_dependencies():
     """Checks and installs required Python packages."""
-    needed = ["pyngrok", "python-dotenv", "qrcode", "pinggy"]
+    needed = ["python-dotenv", "qrcode", "Pillow"]
     installed = []
     
     # Check what is missing
     for pkg in needed:
         try:
-            if pkg == "pyngrok": from pyngrok import ngrok
-            elif pkg == "python-dotenv": from dotenv import load_dotenv
+            if pkg == "python-dotenv": from dotenv import load_dotenv
             elif pkg == "qrcode": import qrcode
-            elif pkg == "pinggy": import pinggy
+            elif pkg == "Pillow": import PIL
             installed.append(pkg)
         except ImportError:
             pass
@@ -30,12 +36,13 @@ def check_dependencies():
     missing = [pkg for pkg in needed if pkg not in installed]
     
     if missing:
-        print(f"📦 Installing missing dependencies: {', '.join(missing)}...")
+        print(f"📦 Installing missing dependencies: {', '.join(missing)}...", flush=True)
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
-            print("✅ Dependencies installed.\n")
+            cmd = [sys.executable, "-m", "pip", "install", "-i", "https://pypi.tuna.tsinghua.edu.cn/simple", "--trusted-host", "pypi.tuna.tsinghua.edu.cn"] + missing
+            subprocess.check_call(cmd)
+            print("✅ Dependencies installed.\n", flush=True)
         except Exception as e:
-            print(f"❌ Failed to install dependencies: {e}")
+            print(f"❌ Failed to install dependencies: {e}", flush=True)
             sys.exit(1)
 
 def check_node_environment():
@@ -64,17 +71,31 @@ def check_node_environment():
 # -----------------------------------------------------------------------------
 def get_local_ip():
     """Robustly determines the local LAN IP address."""
+    if os.environ.get('LOCAL_IP'):
+        return os.environ.get('LOCAL_IP')
+    try:
+        # Check all available IPv4 addresses
+        ips = [ip[4][0] for ip in socket.getaddrinfo(socket.gethostname(), None) if ':' not in ip[4][0]]
+        # Filter out loopback, link-local, and VPN/Clash TUN fake-ips (198.18.x.x)
+        valid_ips = [ip for ip in ips if not (ip.startswith('127.') or ip.startswith('169.254.') or ip.startswith('198.18.'))]
+        # Prioritize real LAN IPs (192.168.x.x excluding 192.168.137.x hotspot if another exists)
+        non_hotspot = [ip for ip in valid_ips if not ip.startswith('192.168.137.')]
+        if non_hotspot:
+            return non_hotspot[0]
+        if valid_ips:
+            return valid_ips[0]
+    except Exception:
+        pass
     s = None
     try:
-        # Connect to a public DNS server (doesn't actually send data)
-        # This forces the OS to determine the correct outgoing interface
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
         IP = s.getsockname()[0]
     except Exception:
         IP = '127.0.0.1'
     finally:
-        s.close()
+        if s:
+            s.close()
     return IP
 
 def generate_passcode():
@@ -82,14 +103,33 @@ def generate_passcode():
     return ''.join(random.choices(string.digits, k=6))
 
 def print_qr(url):
-    """Generates and prints a QR code to the terminal."""
+    """Generates and prints a QR code to the terminal, and saves a crisp image."""
     import qrcode
-    qr = qrcode.QRCode(version=1, box_size=1, border=1)
-    qr.add_data(url)
-    qr.make(fit=True)
-    # Using 'ANSI' implies standard block characters which work in most terminals
-    # invert=True is often needed for dark terminals (white blocks on black bg)
-    qr.print_ascii(invert=True)
+    # 1. Save crisp PNG with standard quiet zone border
+    try:
+        img_qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        img_qr.add_data(url)
+        img_qr.make(fit=True)
+        img = img_qr.make_image(fill_color="black", back_color="white")
+        qr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
+        img.save(qr_path)
+        print(f"🖼️  Saved scannable QR image -> {qr_path}")
+        if sys.platform == "win32":
+            try:
+                os.startfile(qr_path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2. Terminal ASCII printing with border
+    try:
+        qr = qrcode.QRCode(version=1, box_size=1, border=2)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except Exception:
+        pass
 
 # -----------------------------------------------------------------------------
 # Main Execution
@@ -104,28 +144,30 @@ def main():
     check_dependencies()
     check_node_environment()
     
-    # Suppress pyngrok noise (especially during shutdown)
-    logging.getLogger("pyngrok").setLevel(logging.ERROR)
-    
-    from pyngrok import ngrok
-
     from dotenv import load_dotenv
-    
+
     # Load .env if it exists
     load_dotenv()
 
     # Determine Provider
     provider = args.provider or os.environ.get('TUNNEL_PROVIDER', 'ngrok').lower()
+
+    if provider == 'ngrok':
+        try:
+            from pyngrok import ngrok
+            logging.getLogger("pyngrok").setLevel(logging.ERROR)
+        except ImportError:
+            pass
     
     # Setup App Password
     passcode = os.environ.get('APP_PASSWORD')
     if not passcode:
         passcode = generate_passcode()
         os.environ['APP_PASSWORD'] = passcode # Set for child process
-        print(f"⚠️  No APP_PASSWORD in .env. Using temporary: {passcode}")
+        print(f"⚠️  No APP_PASSWORD in .env. Using temporary: {passcode}", flush=True)
 
     # 2. Start Node.js Server (Common to both modes)
-    print(f"🚀 Starting Antigravity Server ({args.mode.upper()} mode)...")
+    print(f"🚀 Starting Antigravity Server ({args.mode.upper()} mode)...", flush=True)
     
     # Clean up old logs
     with open("server_log.txt", "w") as f:
@@ -221,14 +263,24 @@ def main():
                     sys.exit(1)
 
             elif provider == 'cloudflare':
+                # Locate cloudflared binary
+                cf_bin = "cloudflared"
+                for candidate in [
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloudflared.exe"),
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "cloudflared.exe"),
+                    os.path.join(os.getcwd(), "cloudflared.exe"),
+                    os.path.join(os.getcwd(), "bin", "cloudflared.exe"),
+                ]:
+                    if os.path.exists(candidate):
+                        cf_bin = candidate
+                        break
+
                 cf_name = os.environ.get('CLOUDFLARE_TUNNEL_NAME') or os.environ.get('CLOUDFLARE_TUNNEL_ID')
                 cf_custom_url = os.environ.get('CLOUDFLARE_TUNNEL_URL')
 
                 if cf_name:
                     print(f"PLEASE WAIT... Starting Persistent Cloudflare Tunnel: {cf_name}...")
-                    # For a named tunnel, the user usually has it configured to point to localhost:PORT
-                    # We run it using the name/ID.
-                    cf_cmd = ["cloudflared", "tunnel", "run", cf_name]
+                    cf_cmd = [cf_bin, "tunnel", "run", cf_name]
                     public_url = cf_custom_url
                     
                     if not public_url:
@@ -237,21 +289,18 @@ def main():
                     
                     try:
                         cf_process = subprocess.Popen(cf_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        # Give it a moment to stabilize
                         time.sleep(2)
                     except FileNotFoundError:
                         print("❌ Error: 'cloudflared' binary not found.")
                         sys.exit(1)
                 else:
-                    print("PLEASE WAIT... Establishing Ephemeral Cloudflare Tunnel...")
-                    # Start cloudflared in a separate process
-                    # We use --url to create an ephemeral TryCloudflare tunnel
-                    cf_cmd = ["cloudflared", "tunnel", "--url", addr]
+                    print("PLEASE WAIT... Establishing Ephemeral Cloudflare Tunnel...", flush=True)
+                    print("⏳ Connecting to Cloudflare edge network (typically takes 5-15s)...", flush=True)
+                    cf_cmd = [cf_bin, "tunnel", "--url", addr, "--protocol", "http2"]
                     
                     if protocol == "https":
                         cf_cmd.append("--no-tls-verify")
                     
-                    # We need to capture stderr because cloudflared prints the URL there
                     try:
                         cf_process = subprocess.Popen(
                             cf_cmd, 
@@ -262,17 +311,20 @@ def main():
                             universal_newlines=True
                         )
                         
-                        # Watch for the URL in the output
                         start_time = time.time()
-                        timeout = 30 # seconds
+                        timeout = 60 # seconds
                         
                         while time.time() - start_time < timeout:
                             line = cf_process.stdout.readline()
                             if not line:
                                 break
                             
-                            # Cloudflare outputs things like: 
-                            # |  https://some-subdomain.trycloudflare.com                           |
+                            line_str = line.strip()
+                            if "Requesting new quick tunnel" in line_str:
+                                print("   → Requesting tunnel assignment from Cloudflare...", flush=True)
+                            elif "Registered tunnel connection" in line_str:
+                                print("   → Edge connection established...", flush=True)
+
                             if ".trycloudflare.com" in line:
                                 import re
                                 match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
@@ -281,12 +333,12 @@ def main():
                                     break
                         
                         if not public_url:
-                            print("❌ Failed to find Cloudflare Tunnel URL. Is 'cloudflared' installed?")
+                            print("❌ Failed to find Cloudflare Tunnel URL. Check internet connectivity.", flush=True)
                             cf_process.terminate()
                             sys.exit(1)
                             
                     except FileNotFoundError:
-                        print("❌ Error: 'cloudflared' binary not found. Please install it from: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/install-run/")
+                        print("❌ Error: 'cloudflared' binary not found. Please install it.")
                         sys.exit(1)
                     except Exception as e:
                         print(f"❌ Failed to start Cloudflare Tunnel: {e}")
@@ -338,8 +390,16 @@ def main():
             
             # Check process status
             if node_process.poll() is not None:
-                print("\n❌ Server process died unexpectedly!")
-                sys.exit(1)
+                if node_process.returncode == 0:
+                    break
+                print(f"\n⚠️ Server process stopped (code {node_process.returncode}). Restarting in 2s...")
+                time.sleep(2)
+                try:
+                    log_file = open("server_log.txt", "a")
+                    node_process = subprocess.Popen(node_cmd, stdout=log_file, stderr=subprocess.STDOUT)
+                except Exception as restart_err:
+                    print(f"\n❌ Server process died: {restart_err}")
+                    sys.exit(1)
                 
             # Monitor logs for errors
             try:

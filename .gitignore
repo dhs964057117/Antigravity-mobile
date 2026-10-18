@@ -40,10 +40,15 @@ registry/
 venv/
 .venv/
 env/
-scripts/ (Windows specific)
-bin/ (Linux specific)
+scripts/
+bin/
 pyvenv.cfg
 include/
 lib/
 lib64/
 share/
+
+# Binaries & Runtime generated files
+cloudflared.exe
+qrcode.png
+scratch/
