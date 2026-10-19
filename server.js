@@ -798,128 +798,158 @@ async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
     return { error: 'Scroll failed in all contexts' };
 }
 
+// Models Catalog with full metadata
+const MODELS_CATALOG = [
+    {
+        id: "gemini-3.8-flash",
+        name: "Gemini 3.8 Flash High",
+        displayName: "Gemini 3.8 Flash",
+        family: "Google",
+        effort: "High",
+        badge: "默认 · 极速",
+        desc: "极速长上下文与强逻辑推理，日常工程首选",
+        contextWindow: "1,000,000",
+        rateLimit: "高配额 (High RPM)"
+    },
+    {
+        id: "gemini-3.1-pro",
+        name: "Gemini 3.1 Pro (High)",
+        displayName: "Gemini 3.1 Pro",
+        family: "Google",
+        effort: "High",
+        badge: "深度推理",
+        desc: "复杂代码重构、跨模块系统分析与算法攻关",
+        contextWindow: "2,000,000",
+        rateLimit: "标准配额"
+    },
+    {
+        id: "gemini-3-flash",
+        name: "Gemini 3 Flash",
+        displayName: "Gemini 3 Flash",
+        family: "Google",
+        effort: "Standard",
+        badge: "轻量快速",
+        desc: "轻量高吞吐量日常助手，极低延迟",
+        contextWindow: "1,000,000",
+        rateLimit: "极高配额"
+    },
+    {
+        id: "claude-sonnet-4.6",
+        name: "Claude Sonnet 4.6 (Thinking)",
+        displayName: "Claude Sonnet 4.6",
+        family: "Anthropic",
+        effort: "Thinking",
+        badge: "深度思考",
+        desc: "混合思考架构，复杂系统设计与精细代码修改",
+        contextWindow: "200,000",
+        rateLimit: "标准配额"
+    },
+    {
+        id: "claude-opus-4.6",
+        name: "Claude Opus 4.6 (Thinking)",
+        displayName: "Claude Opus 4.6",
+        family: "Anthropic",
+        effort: "Thinking",
+        badge: "顶级推演",
+        desc: "顶级学术与极高复杂度推演，最强综合推理能力",
+        contextWindow: "200,000",
+        rateLimit: "高级配额"
+    },
+    {
+        id: "gpt-oss-120b",
+        name: "GPT-OSS 120B (Medium)",
+        displayName: "GPT-OSS 120B",
+        family: "Open-Source",
+        effort: "Medium",
+        badge: "开源前沿",
+        desc: "开源旗舰权重与通用编程推理",
+        contextWindow: "128,000",
+        rateLimit: "标准配额"
+    }
+];
+
+function formatUptime(seconds) {
+    const d = Math.floor(seconds / (3600 * 24));
+    const h = Math.floor((seconds % (3600 * 24)) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (d > 0) return `${d}天 ${h}小时 ${m}分`;
+    if (h > 0) return `${h}小时 ${m}分`;
+    if (m > 0) return `${m}分 ${s}秒`;
+    return `${s}秒`;
+}
+
 // Set AI Model
 async function setModel(cdp, modelName) {
+    const safeModelName = JSON.stringify(modelName);
     const EXP = `(async () => {
         try {
-            // STRATEGY: Multi-layered approach to find and click the model selector
-            const KNOWN_KEYWORDS = ["Gemini", "Claude", "GPT", "Model"];
-            
-            let modelBtn = null;
-            
-            // Strategy 1: Look for data-testid and aria-label (Antigravity 2.0)
-            modelBtn = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"], [data-tooltip-id*="model"], [data-tooltip-id*="provider"]');
-            
-            // Strategy 2: Look for buttons/elements containing model keywords with SVG icons
-            if (!modelBtn) {
-                const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
+            const rawTarget = ${safeModelName}.trim();
+            const targetLower = rawTarget.toLowerCase();
+
+            // 1. Open model selector trigger
+            let trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"], [data-tooltip-id*="model"]');
+            if (!trigger) {
+                const candidates = Array.from(document.querySelectorAll('button, [role="button"]'))
                     .filter(el => {
-                        const txt = el.innerText?.trim() || '';
-                        return KNOWN_KEYWORDS.some(k => txt.includes(k)) && el.offsetParent !== null;
+                        const txt = (el.innerText || '').trim();
+                        return ["Gemini", "Claude", "GPT", "Model"].some(k => txt.includes(k)) && el.offsetParent !== null;
                     });
-
-                // Find the best one (has chevron icon or cursor pointer)
-                modelBtn = candidates.find(el => {
-                    const style = window.getComputedStyle(el);
-                    const hasSvg = el.querySelector('svg.lucide-chevron-up') || 
-                                   el.querySelector('svg.lucide-chevron-down') || 
-                                   el.querySelector('svg[class*="chevron"]') ||
-                                   el.querySelector('svg');
-                    return (style.cursor === 'pointer' || el.tagName === 'BUTTON') && hasSvg;
-                }) || candidates[0];
+                trigger = candidates[0];
             }
+
+            if (!trigger) return { error: 'Model selector trigger not found' };
+
+            // Check if already matches
+            const currentTriggerText = (trigger.innerText || '').toLowerCase();
+            if (currentTriggerText.includes(targetLower) || targetLower.includes(currentTriggerText)) {
+                return { success: true, alreadySet: true, model: trigger.innerText.trim() };
+            }
+
+            // Check if panel is already open
+            let panel = document.querySelector('[data-testid="model-selector-panel"], [role="menu"]');
+            if (!panel) {
+                trigger.click();
+                await new Promise(r => setTimeout(r, 450));
+                panel = document.querySelector('[data-testid="model-selector-panel"], [role="menu"]');
+            }
+
+            // Find all candidate items in document or panel
+            const items = Array.from(document.querySelectorAll('[role="menuitem"], [data-testid="model-selector-item"], [data-radix-collection-item], button'));
             
-            // Strategy 3: Traverse from text nodes up to clickable parents
-            if (!modelBtn) {
-                const allEls = Array.from(document.querySelectorAll('*'));
-                const textNodes = allEls.filter(el => {
-                    if (el.children.length > 0) return false;
-                    const txt = el.textContent;
-                    return KNOWN_KEYWORDS.some(k => txt.includes(k));
+            // Priority 1: Exact or startsWith match
+            let found = items.find(el => {
+                const txt = (el.innerText || '').trim().toLowerCase();
+                return txt.startsWith(targetLower) || txt === targetLower;
+            });
+
+            // Priority 2: Contains both brand and version (e.g. "sonnet" and "4.6")
+            if (!found) {
+                const tokens = targetLower.split(/[\\s\\(\\)]+/).filter(t => t.length >= 3);
+                found = items.find(el => {
+                    const txt = (el.innerText || '').trim().toLowerCase();
+                    return tokens.length > 0 && tokens.every(t => txt.includes(t));
                 });
-
-                for (const el of textNodes) {
-                    let current = el;
-                    for (let i = 0; i < 5; i++) {
-                        if (!current) break;
-                        if (current.tagName === 'BUTTON' || window.getComputedStyle(current).cursor === 'pointer') {
-                            modelBtn = current;
-                            break;
-                        }
-                        current = current.parentElement;
-                    }
-                    if (modelBtn) break;
-                }
             }
 
-            if (!modelBtn) return { error: 'Model selector button not found' };
-
-            // Click to open menu
-            modelBtn.click();
-            await new Promise(r => setTimeout(r, 600));
-
-            // Find the dialog/dropdown - search globally (React portals render at body level)
-            let visibleDialog = null;
-            
-            // Try specific dialog patterns first
-            const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]'));
-            visibleDialog = dialogs.find(d => d.offsetHeight > 0 && d.innerText?.includes('${modelName}'));
-            
-            // Fallback: look for positioned divs
-            if (!visibleDialog) {
-                visibleDialog = Array.from(document.querySelectorAll('div'))
-                    .find(d => {
-                        const style = window.getComputedStyle(d);
-                        return d.offsetHeight > 0 && 
-                               (style.position === 'absolute' || style.position === 'fixed') && 
-                               d.innerText?.includes('${modelName}') && 
-                               !d.innerText?.includes('Files With Changes');
-                    });
+            // Priority 3: Loose includes
+            if (!found) {
+                found = items.find(el => {
+                    const txt = (el.innerText || '').trim().toLowerCase();
+                    return txt.includes(targetLower) || targetLower.includes(txt);
+                });
             }
 
-            if (!visibleDialog) {
-                // Blind search across entire document as last resort
-                const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
-                const target = allElements.find(el => 
-                    el.offsetParent !== null && 
-                    (el.innerText?.trim() === '${modelName}' || el.innerText?.includes('${modelName}'))
-                );
-                if (target) {
-                    target.click();
-                    return { success: true, method: 'blind_search' };
-                }
-                return { error: 'Model list not opened' };
+            if (found) {
+                found.scrollIntoView({ block: 'nearest' });
+                found.click();
+                await new Promise(r => setTimeout(r, 250));
+                return { success: true, model: (found.innerText || '').trim() };
             }
 
-            // Select specific model inside the dialog
-            const allDialogEls = Array.from(visibleDialog.querySelectorAll('*'));
-            const validEls = allDialogEls.filter(el => el.children.length === 0 && el.textContent?.trim().length > 0);
-            
-            // A. Exact Match (Best)
-            let target = validEls.find(el => el.textContent.trim() === '${modelName}');
-            
-            // B. Page contains Model
-            if (!target) {
-                target = validEls.find(el => el.textContent.includes('${modelName}'));
-            }
-
-            // C. Closest partial match
-            if (!target) {
-                const partialMatches = validEls.filter(el => '${modelName}'.includes(el.textContent.trim()));
-                if (partialMatches.length > 0) {
-                    partialMatches.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length);
-                    target = partialMatches[0];
-                }
-            }
-
-            if (target) {
-                target.scrollIntoView({block: 'center'});
-                target.click();
-                await new Promise(r => setTimeout(r, 200));
-                return { success: true };
-            }
-
-            return { error: 'Model "${modelName}" not found in list. Visible: ' + visibleDialog.innerText.substring(0, 100) };
+            // Close menu if not found
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+            return { error: 'Model not found in menu: ' + rawTarget };
         } catch(err) {
             return { error: 'JS Error: ' + err.toString() };
         }
@@ -933,10 +963,68 @@ async function setModel(cdp, modelName) {
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value) return res.result.value;
+            if (res.result?.value?.success) return res.result.value;
         } catch (e) { }
     }
-    return { error: 'Context failed' };
+    return { error: 'Failed to set model' };
+}
+
+// Get Usage Metrics
+async function getUsageMetrics(cdp) {
+    let appState = { mode: 'Turbo', model: 'Gemini 3.8 Flash High' };
+    try {
+        if (cdp) appState = await getAppState(cdp);
+    } catch(e) {}
+
+    let turnCount = 0;
+    let userMsgCount = 0;
+    let assistantMsgCount = 0;
+    let approxTokens = 0;
+
+    if (lastSnapshot && lastSnapshot.html) {
+        const html = lastSnapshot.html;
+        userMsgCount = (html.match(/bg-background|md-sticky-message-bleed/g) || []).length;
+        assistantMsgCount = (html.match(/role="article"|markdown|prose/g) || []).length;
+        turnCount = Math.max(userMsgCount, Math.ceil(assistantMsgCount / 2));
+        
+        const strippedLen = html.replace(/<[^>]*>/g, '').length;
+        approxTokens = Math.round(strippedLen / 3.8);
+    }
+
+    const currentModelName = appState.model || 'Gemini 3.8 Flash High';
+    const currentModeName = appState.mode || 'Turbo';
+
+    let maxContextTokens = 1000000;
+    if (currentModelName.includes('Pro')) maxContextTokens = 2000000;
+    else if (currentModelName.includes('Claude')) maxContextTokens = 200000;
+    else if (currentModelName.includes('GPT')) maxContextTokens = 128000;
+
+    const contextUsedPercent = Math.min(100, Math.max(1, parseFloat(((approxTokens / maxContextTokens) * 100).toFixed(1))));
+
+    return {
+        success: true,
+        model: currentModelName,
+        mode: currentModeName,
+        session: {
+            turns: turnCount,
+            userMessages: userMsgCount,
+            assistantMessages: assistantMsgCount,
+            approxTokens,
+            maxContextTokens,
+            contextUsedPercent,
+            nodes: lastSnapshot?.stats?.nodes || 0,
+            payloadKb: lastSnapshot ? Math.round((lastSnapshot.stats.htmlSize + lastSnapshot.stats.cssSize) / 1024) : 0
+        },
+        system: {
+            uptimeSeconds: Math.round(process.uptime()),
+            uptimeFormatted: formatUptime(process.uptime()),
+            cdpConnected: cdp?.ws?.readyState === 1,
+            memoryMb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
+            localIP: getLocalIP(),
+            port: SERVER_PORT
+        },
+        models: MODELS_CATALOG
+    };
 }
 
 // Start New Chat - Click the + button at the TOP of the chat window (NOT the context/media + button)
@@ -2005,6 +2093,17 @@ async function main() {
             if (!cdpConnection) return res.json({ mode: 'Unknown', model: 'Unknown' });
             const result = await getAppState(cdpConnection);
             res.json(result);
+        });
+
+        // Get Available Models Catalog
+        app.get('/models', (req, res) => {
+            res.json({ success: true, models: MODELS_CATALOG });
+        });
+
+        // Get Usage & Quota Metrics
+        app.get('/usage', async (req, res) => {
+            const metrics = await getUsageMetrics(cdpConnection);
+            res.json(metrics);
         });
 
         // Start New Chat
