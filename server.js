@@ -1131,7 +1131,14 @@ const MODELS_CATALOG = [
         badge: "默认 · 极速",
         desc: "极速长上下文与强逻辑推理，日常工程首选",
         contextWindow: "1,000,000",
-        rateLimit: "高配额 (High RPM)"
+        contextWindowNum: 1000000,
+        maxOutput: "8,192",
+        rpm: "15 ~ 360 RPM",
+        tpm: "1,000,000 ~ 4,000,000 TPM",
+        rpd: "1,500 ~ 10,000 RPD",
+        rateLimit: "高配额 (High RPM)",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     },
     {
         id: "gemini-3.1-pro",
@@ -1142,7 +1149,14 @@ const MODELS_CATALOG = [
         badge: "深度推理",
         desc: "复杂代码重构、跨模块系统分析与算法攻关",
         contextWindow: "2,000,000",
-        rateLimit: "标准配额"
+        contextWindowNum: 2000000,
+        maxOutput: "8,192",
+        rpm: "5 ~ 150 RPM",
+        tpm: "360,000 ~ 2,000,000 TPM",
+        rpd: "1,000 ~ 5,000 RPD",
+        rateLimit: "标准配额",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     },
     {
         id: "gemini-3-flash",
@@ -1153,7 +1167,14 @@ const MODELS_CATALOG = [
         badge: "轻量快速",
         desc: "轻量高吞吐量日常助手，极低延迟",
         contextWindow: "1,000,000",
-        rateLimit: "极高配额"
+        contextWindowNum: 1000000,
+        maxOutput: "8,192",
+        rpm: "30 ~ 500 RPM",
+        tpm: "2,000,000 ~ 4,000,000 TPM",
+        rpd: "2,000 ~ 20,000 RPD",
+        rateLimit: "极高配额",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     },
     {
         id: "claude-sonnet-4.6",
@@ -1164,7 +1185,14 @@ const MODELS_CATALOG = [
         badge: "深度思考",
         desc: "混合思考架构，复杂系统设计与精细代码修改",
         contextWindow: "200,000",
-        rateLimit: "标准配额"
+        contextWindowNum: 200000,
+        maxOutput: "8,192",
+        rpm: "50 RPM",
+        tpm: "100,000 TPM",
+        rpd: "1,000 ~ 4,000 RPD",
+        rateLimit: "标准配额",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     },
     {
         id: "claude-opus-4.6",
@@ -1175,7 +1203,14 @@ const MODELS_CATALOG = [
         badge: "顶级推演",
         desc: "顶级学术与极高复杂度推演，最强综合推理能力",
         contextWindow: "200,000",
-        rateLimit: "高级配额"
+        contextWindowNum: 200000,
+        maxOutput: "8,192",
+        rpm: "20 RPM",
+        tpm: "80,000 TPM",
+        rpd: "500 ~ 2,000 RPD",
+        rateLimit: "高级配额",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     },
     {
         id: "gpt-oss-120b",
@@ -1186,7 +1221,14 @@ const MODELS_CATALOG = [
         badge: "开源前沿",
         desc: "开源旗舰权重与通用编程推理",
         contextWindow: "128,000",
-        rateLimit: "标准配额"
+        contextWindowNum: 128000,
+        maxOutput: "4,096",
+        rpm: "60 RPM",
+        tpm: "150,000 TPM",
+        rpd: "3,000 RPD",
+        rateLimit: "标准配额",
+        cooldownWindow: "60s 滑动窗口自动恢复",
+        dailyReset: "08:00 CST (UTC 00:00)"
     }
 ];
 
@@ -1316,17 +1358,33 @@ async function getUsageMetrics(cdp) {
     const currentModelName = appState.model || 'Gemini 3.8 Flash High';
     const currentModeName = appState.mode || 'Turbo';
 
-    let maxContextTokens = 1000000;
-    if (currentModelName.includes('Pro')) maxContextTokens = 2000000;
-    else if (currentModelName.includes('Claude')) maxContextTokens = 200000;
-    else if (currentModelName.includes('GPT')) maxContextTokens = 128000;
+    // Find active model in catalog
+    const matchedModel = MODELS_CATALOG.find(m => 
+        currentModelName.toLowerCase().includes(m.id) || 
+        m.name.toLowerCase().includes(currentModelName.toLowerCase()) ||
+        currentModelName.toLowerCase().includes(m.displayName.toLowerCase())
+    ) || MODELS_CATALOG[0];
 
+    const maxContextTokens = matchedModel.contextWindowNum || 1000000;
     const contextUsedPercent = Math.min(100, Math.max(1, parseFloat(((approxTokens / maxContextTokens) * 100).toFixed(1))));
+
+    // Calculate daily quota reset timestamp (Global reset is at UTC 00:00, which is Beijing Time 08:00 CST)
+    const now = new Date();
+    const nextDailyResetUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+    const secondsUntilDailyReset = Math.max(0, Math.floor((nextDailyResetUtc.getTime() - now.getTime()) / 1000));
+    const hRemain = Math.floor(secondsUntilDailyReset / 3600);
+    const mRemain = Math.floor((secondsUntilDailyReset % 3600) / 60);
+    const sRemain = secondsUntilDailyReset % 60;
+    const dailyResetCountdown = `${String(hRemain).padStart(2, '0')}:${String(mRemain).padStart(2, '0')}:${String(sRemain).padStart(2, '0')}`;
+
+    // Sliding window cooldown (RPM/TPM is a 60-second rolling window)
+    const secondsUntilNextMinute = 60 - now.getUTCSeconds();
 
     return {
         success: true,
         model: currentModelName,
         mode: currentModeName,
+        matchedModel,
         session: {
             turns: turnCount,
             userMessages: userMsgCount,
@@ -1336,6 +1394,15 @@ async function getUsageMetrics(cdp) {
             contextUsedPercent,
             nodes: lastSnapshot?.stats?.nodes || 0,
             payloadKb: lastSnapshot ? Math.round((lastSnapshot.stats.htmlSize + lastSnapshot.stats.cssSize) / 1024) : 0
+        },
+        quota: {
+            nextDailyResetUtc: nextDailyResetUtc.toISOString(),
+            nextDailyResetBeijing: '次日 08:00 CST',
+            dailyResetSecondsRemaining: secondsUntilDailyReset,
+            dailyResetCountdown,
+            slidingWindowSeconds: secondsUntilNextMinute,
+            dailyResetRule: '每日 00:00 UTC (北京时间 08:00) 统一重置 RPD 额度',
+            slidingWindowRule: 'RPM / TPM 突发超限采用 60 秒平滑滑动窗口自动恢复'
         },
         system: {
             uptimeSeconds: Math.round(process.uptime()),

@@ -1038,6 +1038,9 @@ async function fetchUsageData() {
 function renderUsageModal(data) {
     const session = data.session || {};
     const system = data.system || {};
+    const quota = data.quota || {};
+    const matchedModel = data.matchedModel || {};
+    const models = data.models || [];
 
     const turns = session.turns || 0;
     const tokens = (session.approxTokens || 0).toLocaleString();
@@ -1046,7 +1049,94 @@ function renderUsageModal(data) {
     const nodes = session.nodes || 0;
     const payloadKb = session.payloadKb || 0;
 
+    // Build models table rows
+    const tableRows = models.map(m => {
+        const isCurrent = (data.model && data.model.toLowerCase().includes(m.id)) || 
+                          (m.name && m.name === data.model) ||
+                          (m.id === matchedModel.id);
+        const rowStyle = isCurrent ? 'background:rgba(99, 102, 241, 0.12); font-weight:600;' : '';
+        const currentTag = isCurrent ? ' <span class="limit-badge primary">当前生效</span>' : '';
+        return `
+            <tr style="${rowStyle}">
+                <td>
+                    <b>${escapeHtml(m.displayName || m.name)}</b>${currentTag}
+                    <div style="font-size:10.5px; color:var(--text-muted); margin-top:2px;">${escapeHtml(m.desc || '')}</div>
+                </td>
+                <td><b>${m.contextWindow || '1M'}</b></td>
+                <td>${m.rpm || '标准'} / ${m.tpm || '高'}</td>
+                <td>${m.rpd || '充裕'}</td>
+                <td><span class="limit-badge success">${escapeHtml(m.dailyReset || '08:00 CST')}</span></td>
+            </tr>
+        `;
+    }).join('');
+
     usageModalBody.innerHTML = `
+        <!-- Section 1: 配额重置与限速刷新倒计时 -->
+        <div class="usage-section-title">配额重置与速率刷新 (Quota & Recovery)</div>
+        <div class="quota-reset-grid">
+            <div class="quota-card">
+                <div class="quota-card-header">
+                    <span class="quota-card-title">
+                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        每日配额总重置 (Daily RPD)
+                    </span>
+                    <span class="quota-card-badge">北京时间 08:00</span>
+                </div>
+                <div class="quota-countdown-val" id="dailyResetCountdownVal">${quota.dailyResetCountdown || '--:--:--'}</div>
+                <div class="quota-card-desc">
+                    ${quota.dailyResetRule || '每日 00:00 UTC (北京时间 08:00) 统一重置 RPD 配额'}
+                </div>
+            </div>
+
+            <div class="quota-card sliding">
+                <div class="quota-card-header">
+                    <span class="quota-card-title">
+                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                        速率滑动窗口 (RPM / TPM)
+                    </span>
+                    <span class="quota-card-badge">60s 滑动窗口</span>
+                </div>
+                <div class="quota-countdown-val" id="slidingResetCountdownVal">${quota.slidingWindowSeconds || 60}s</div>
+                <div class="quota-card-desc">
+                    ${quota.slidingWindowRule || '突发超限 60 秒平滑恢复，无须等待次日'}
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 2: 当前生效模型规格与速率配额 -->
+        <div class="usage-section-title">当前模型用量规格与速率限制</div>
+        <div class="active-model-card">
+            <div class="active-model-header">
+                <div class="active-model-name">
+                    <span>${escapeHtml(matchedModel.name || data.model || currentModel)}</span>
+                    <span class="limit-badge primary">${escapeHtml(matchedModel.badge || '活跃')}</span>
+                </div>
+                <span class="limit-badge success">${escapeHtml(matchedModel.rateLimit || '标准配额')}</span>
+            </div>
+            <div style="font-size:12px; color:var(--text-secondary); line-height:1.4;">
+                ${escapeHtml(matchedModel.desc || '日常全能型工程助手')}
+            </div>
+            <div class="model-limits-grid" style="margin-top:10px;">
+                <div class="model-limit-item">
+                    <div class="model-limit-val">${matchedModel.contextWindow || '1M'}</div>
+                    <div class="model-limit-lbl">上下文窗口</div>
+                </div>
+                <div class="model-limit-item">
+                    <div class="model-limit-val">${matchedModel.maxOutput || '8,192'}</div>
+                    <div class="model-limit-lbl">单次最大输出</div>
+                </div>
+                <div class="model-limit-item">
+                    <div class="model-limit-val">${matchedModel.rpm || '15 ~ 360'}</div>
+                    <div class="model-limit-lbl">分钟速率 (RPM)</div>
+                </div>
+                <div class="model-limit-item">
+                    <div class="model-limit-val">${matchedModel.rpd || '1,500+'}</div>
+                    <div class="model-limit-lbl">每日限额 (RPD)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 3: 当前会话上下文占用与消耗 -->
         <div class="usage-section-title">当前会话统计 (Current Session)</div>
         <div class="usage-stats-grid">
             <div class="usage-stat-box">
@@ -1076,52 +1166,26 @@ function renderUsageModal(data) {
             </div>
         </div>
 
-        <div class="usage-section-title">模型限制与速率配额参考</div>
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); overflow:hidden;">
+        <!-- Section 4: 各模型配额限制与重置周期对比 -->
+        <div class="usage-section-title">各模型配额限制与重置周期对比</div>
+        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); overflow-x:auto;">
             <table class="usage-table">
                 <thead>
                     <tr>
-                        <th>模型名称</th>
-                        <th>上下文限制</th>
-                        <th>速率规格</th>
-                        <th>推理特点</th>
+                        <th style="min-width:140px;">模型名称</th>
+                        <th>上下文</th>
+                        <th>速率 (RPM/TPM)</th>
+                        <th>每日上限 (RPD)</th>
+                        <th>重置时间</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr>
-                        <td><b>Gemini 3.8 Flash</b></td>
-                        <td>1,000,000</td>
-                        <td>高 RPM / 极低延迟</td>
-                        <td>日常主力 · 高吞吐</td>
-                    </tr>
-                    <tr>
-                        <td><b>Gemini 3.1 Pro</b></td>
-                        <td>2,000,000</td>
-                        <td>标准 RPM</td>
-                        <td>复杂多步推理</td>
-                    </tr>
-                    <tr>
-                        <td><b>Claude Sonnet 4.6</b></td>
-                        <td>200,000</td>
-                        <td>标准 RPM</td>
-                        <td>深度思考 · 代码重构</td>
-                    </tr>
-                    <tr>
-                        <td><b>Claude Opus 4.6</b></td>
-                        <td>200,000</td>
-                        <td>高级 RPM</td>
-                        <td>极深学术推演</td>
-                    </tr>
-                    <tr>
-                        <td><b>GPT-OSS 120B</b></td>
-                        <td>128,000</td>
-                        <td>标准 RPM</td>
-                        <td>开源前沿权重</td>
-                    </tr>
+                    ${tableRows}
                 </tbody>
             </table>
         </div>
 
+        <!-- Section 5: 系统通道与连接运行状态 -->
         <div class="usage-section-title">系统通道与连接运行状态</div>
         <div class="system-status-pills">
             <div class="sys-pill">当前模型: <b>${escapeHtml(data.model || currentModel)}</b></div>
@@ -1132,9 +1196,45 @@ function renderUsageModal(data) {
             <div class="sys-pill">端口: <b>${system.port || 3000}</b></div>
         </div>
     `;
+
+    // Start live countdown timer for reset
+    if (window.usageCountdownTimer) clearInterval(window.usageCountdownTimer);
+
+    let dailySeconds = quota.dailyResetSecondsRemaining || 0;
+    let slidingSeconds = quota.slidingWindowSeconds || 60;
+
+    function updateCountdownDisplay() {
+        const h = Math.floor(dailySeconds / 3600);
+        const m = Math.floor((dailySeconds % 3600) / 60);
+        const s = dailySeconds % 60;
+        const dailyEl = document.getElementById('dailyResetCountdownVal');
+        if (dailyEl) {
+            dailyEl.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+        const slidingEl = document.getElementById('slidingResetCountdownVal');
+        if (slidingEl) {
+            slidingEl.textContent = `${slidingSeconds}s`;
+        }
+    }
+
+    updateCountdownDisplay();
+
+    window.usageCountdownTimer = setInterval(() => {
+        if (dailySeconds > 0) dailySeconds--;
+        else dailySeconds = 86400;
+
+        if (slidingSeconds > 1) slidingSeconds--;
+        else slidingSeconds = 60;
+
+        updateCountdownDisplay();
+    }, 1000);
 }
 
 function closeUsageModal() {
+    if (window.usageCountdownTimer) {
+        clearInterval(window.usageCountdownTimer);
+        window.usageCountdownTimer = null;
+    }
     usageModalOverlay.classList.remove('show');
 }
 
