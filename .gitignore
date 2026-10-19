@@ -54,3 +54,7 @@ qrcode.png
 scratch/
 __pycache__/
 *.pyc
+
+# Cloudflare local credentials & configuration
+cloudflare_config.yml
+cloudflare_config.yml.bak

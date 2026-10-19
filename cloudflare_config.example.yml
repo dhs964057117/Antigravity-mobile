@@ -1,0 +1,11 @@
+# Cloudflare Named Tunnel Configuration Template
+# Copy this file to cloudflare_config.yml and replace with your own values:
+tunnel: <your-tunnel-uuid>
+credentials-file: C:\Users\<username>\.cloudflared\<your-tunnel-uuid>.json
+
+ingress:
+  - hostname: <your-custom-domain>
+    service: https://localhost:3000
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404
