@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=3.4">
+    <link rel="stylesheet" href="css/style.css?v=3.5">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self';">
@@ -196,23 +196,54 @@
             <!-- Bottom Composer Area -->
             <div class="composer-container">
                 <div class="composer-inner-wrap">
-                    <!-- Quick action chips -->
-                    <div class="quick-actions-bar">
-                        <button class="action-chip" data-text="继续">继续</button>
-                        <button class="action-chip" data-text="请详细解释这段代码">解释代码</button>
-                        <button class="action-chip" data-text="请检查并修复这段代码的 Bug">修复 Bug</button>
-                        <button class="action-chip" data-text="请为这段代码生成文档和注释">编写文档</button>
+                    <!-- Steer / Interjection Active Notification Banner (shown when agent is executing) -->
+                    <div class="steer-status-banner" id="steerStatusBanner" style="display: none;">
+                        <span class="steer-status-indicator">
+                            <span class="steer-pulse-dot"></span>
+                            <span>⚡ 智能体正在执行，当前输入将作为「插话引导」实时介入</span>
+                        </span>
+                    </div>
+
+                    <!-- Conversation Guidance Bar (对话引导) -->
+                    <div class="guidance-bar-container">
+                        <div class="guidance-bar-header">
+                            <span class="guidance-title">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                对话引导
+                            </span>
+                            <span class="guidance-hint">点击一键发送或填入</span>
+                        </div>
+                        <div class="quick-actions-bar" id="guidanceChipsBar">
+                            <button class="action-chip chip-continue" data-action="continue" data-text="请继续" data-direct="true" title="一键继续执行未完成的对话与任务">
+                                <span class="chip-icon">🚀</span> 继续对话
+                            </button>
+                            <button class="action-chip chip-steer" data-action="steer" data-text="【插话引导】" title="发送插话引导指令介入当前任务">
+                                <span class="chip-icon">⚡</span> 插话引导
+                            </button>
+                            <button class="action-chip" data-action="explain" data-text="请详细解释一下刚才的实现细节与原理" title="要求详细解释">
+                                <span class="chip-icon">💡</span> 解释原理
+                            </button>
+                            <button class="action-chip" data-action="fix" data-text="请检查潜在边界问题、异常情况并进行自测验证" title="检查与自测">
+                                <span class="chip-icon">🛠️</span> 优化自测
+                            </button>
+                            <button class="action-chip" data-action="summary" data-text="请总结当前进展、已变更的文件及下一步建议" title="总结进展">
+                                <span class="chip-icon">📋</span> 总结进展
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Input Card -->
-                    <div class="input-card">
+                    <div class="input-card" id="inputCard">
                         <textarea id="messageInput" placeholder="输入消息... (Shift+Enter 换行, Enter 发送)" rows="1"></textarea>
                         <div class="input-actions-bar">
-                            <span class="desktop-send-hint">Enter 发送 · Shift+Enter 换行</span>
+                            <span class="desktop-send-hint" id="desktopSendHint">Enter 发送 · Shift+Enter 换行</span>
                             <button class="send-btn" id="sendBtn" aria-label="发送消息" title="发送">
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
-                                </svg>
+                                <span class="send-btn-icon" id="sendBtnIcon">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                                    </svg>
+                                </span>
+                                <span class="send-btn-label" id="sendBtnLabel"></span>
                             </button>
                         </div>
                     </div>
@@ -303,7 +334,7 @@
         </div>
     </div>
 
-    <script src="js/app.js?v=3.4"></script>
+    <script src="js/app.js?v=3.5"></script>
 </body>
 
 </html>

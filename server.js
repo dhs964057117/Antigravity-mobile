@@ -478,6 +478,9 @@ async function captureSnapshot(cdp) {
         }
         const allCSS = rules.join('\\n');
         
+        const cancelBtn = document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
+        const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
+
         return {
             html: html,
             css: allCSS,
@@ -485,10 +488,12 @@ async function captureSnapshot(cdp) {
             color: cascadeStyles.color,
             fontFamily: cascadeStyles.fontFamily,
             scrollInfo: scrollInfo,
+            isBusy: isBusy,
             stats: {
                 nodes: clone.getElementsByTagName('*').length,
                 htmlSize: html.length,
-                cssSize: allCSS.length
+                cssSize: allCSS.length,
+                isBusy: isBusy
             }
         };
     })()`;
@@ -525,54 +530,33 @@ async function captureSnapshot(cdp) {
     return null;
 }
 
-// Inject message into Antigravity
-async function injectMessage(cdp, text) {
+// Inject message into Antigravity (Supports regular send and Steer/Interjection 插话引导)
+async function injectMessage(cdp, text, options = {}) {
     if (!text || typeof text !== 'string') {
         return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
     }
 
-    console.log(`[SEND] Processing message (chars: ${text.length})...`);
+    const forceSteer = options.isSteer === true;
+    console.log(`[SEND] Processing message (chars: ${text.length}, forceSteer=${forceSteer})...`);
 
-    // Step 1: Busy check - Check for active task cancellation button
-    const BUSY_CHECK = `(async () => {
+    // Step 1: Detect chat execution state (is the agent actively generating/running?)
+    const BUSY_CHECK = `(() => {
         // Clear previous target markers
         document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
 
-        const cascade = document.getElementById('conversation') || 
-                        document.getElementById('chat') || 
-                        document.getElementById('cascade') ||
-                        document.querySelector('.isolate.overflow-y-auto') ||
-                        document.querySelector('[class*="scrollbar-hide"][class*="overflow-y-auto"]');
+        const inputArea = document.getElementById('antigravity.agentSidePanelInputBox') || 
+                          document.querySelector('#antigravity\\\\.agentSidePanelInputBox');
+        
+        // The chat's active generation button is Cancel (Ctrl+D) inside the input box
+        const cancelBtn = inputArea ? 
+            inputArea.querySelector('button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]') :
+            document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"]');
 
-        const allEditors = Array.from(document.querySelectorAll('[data-lexical-editor="true"], [contenteditable="true"]'))
-            .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
-
-        let target = null;
-        let columnContainer = null;
-        if (cascade) {
-            let curr = cascade;
-            while (curr && curr !== document.body) {
-                target = allEditors.find(ed => curr.contains(ed));
-                if (target) {
-                    columnContainer = curr;
-                    break;
-                }
-                curr = curr.parentElement;
-            }
-        }
-        if (!target) target = allEditors[0];
-
-        // Check if the target's column or document has a Cancel Task button
-        const cancelBtn = columnContainer ? 
-            columnContainer.querySelector('button[aria-label="Cancel Task"], button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]') :
-            document.querySelector('button[aria-label="Cancel Task"], [data-tooltip-id="input-send-button-cancel-tooltip"], button[aria-label*="Cancel (Ctrl+D)"]');
-
-        if (cancelBtn && cancelBtn.offsetParent !== null) {
-            return { busy: true, message: '桌面端正在执行任务，请稍候再发' };
-        }
-        return { busy: false };
+        const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
+        return { busy: isBusy };
     })()`;
 
+    let isAgentBusy = false;
     for (const ctx of cdp.contexts) {
         try {
             const res = await cdp.call("Runtime.evaluate", {
@@ -582,10 +566,15 @@ async function injectMessage(cdp, text) {
                 contextId: ctx.id
             });
             if (res.result?.value?.busy) {
-                console.warn('[SEND] Desktop Antigravity is busy running a task');
-                return { ok: false, error: 'busy', message: res.result.value.message || '桌面端正在执行任务，请稍候再发' };
+                isAgentBusy = true;
+                break;
             }
         } catch (e) { }
+    }
+
+    const isSteerMode = isAgentBusy || forceSteer;
+    if (isSteerMode) {
+        console.log('[SEND] Agent is actively running. Processing message as STEER / INTERJECTION (插话引导)...');
     }
 
     // Step 2: Locate target editor inside Antigravity
@@ -769,39 +758,43 @@ async function injectMessage(cdp, text) {
 
     // Step 6: Multi-tier submission with verified editor clearing and step-by-step logging
 
-    // Priority 1: Check if send button is available and click it
-    const SUBMIT_EXP = `(async () => {
-        const target = document.querySelector('[data-ag-active-target="true"]');
-        const inputContainer = target?.closest('[id*="agentSidePanelInputBox"]') ||
-                               document.getElementById('antigravity.agentSidePanelInputBox') || document;
-        const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
-        if (sendBtn && !sendBtn.disabled) {
-            sendBtn.click();
-            return { clicked: true };
-        }
-        return { clicked: false, disabled: !!(sendBtn && sendBtn.disabled) };
-    })()`;
-
-    try {
-        const submitRes = await cdp.call("Runtime.evaluate", {
-            expression: SUBMIT_EXP,
-            returnByValue: true,
-            awaitPromise: true,
-            contextId: targetContext.id
-        });
-        if (submitRes.result?.value?.clicked) {
-            await new Promise(r => setTimeout(r, 350));
-            const remaining = await readEditorText();
-            console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
-            if (!remaining) {
-                console.log('[SEND] Verified: Submitted successfully via click_submit');
-                return { ok: true, method: 'click_submit', message: '已发送' };
+    // If NOT in steer mode, Priority 1: Check if send button is available and click it
+    if (!isSteerMode) {
+        const SUBMIT_EXP = `(async () => {
+            const target = document.querySelector('[data-ag-active-target="true"]');
+            const inputContainer = target?.closest('[id*="agentSidePanelInputBox"]') ||
+                                   document.getElementById('antigravity.agentSidePanelInputBox') || document;
+            const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
+            if (sendBtn && !sendBtn.disabled) {
+                sendBtn.click();
+                return { clicked: true };
             }
-            console.warn(`[SEND] click_submit did not clear editor (len: ${remaining.length}), trying CDP Enter...`);
-        }
-    } catch (e) { }
+            return { clicked: false, disabled: !!(sendBtn && sendBtn.disabled) };
+        })()`;
 
-    // Priority 2: Dispatch native Enter key via CDP
+        try {
+            const submitRes = await cdp.call("Runtime.evaluate", {
+                expression: SUBMIT_EXP,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: targetContext.id
+            });
+            if (submitRes.result?.value?.clicked) {
+                await new Promise(r => setTimeout(r, 350));
+                const remaining = await readEditorText();
+                console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
+                if (!remaining) {
+                    console.log('[SEND] Verified: Submitted successfully via click_submit');
+                    return { ok: true, isSteer: false, method: 'click_submit', message: '已发送' };
+                }
+                console.warn(`[SEND] click_submit did not clear editor (len: ${remaining.length}), trying CDP Enter...`);
+            }
+        } catch (e) { }
+    } else {
+        console.log('[SEND] Steer mode active: skipping sendBtn.click to avoid triggering task cancel, proceeding directly to CDP Enter');
+    }
+
+    // Priority 2: Dispatch native Enter key via CDP (Primary submission for Steer / Interjection)
     try {
         await cdp.call('Input.dispatchKeyEvent', {
             type: 'rawKeyDown',
@@ -830,8 +823,13 @@ async function injectMessage(cdp, text) {
         const remaining = await readEditorText();
         console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
         if (!remaining) {
-            console.log('[SEND] Verified: Submitted successfully via cdp_enter');
-            return { ok: true, method: 'cdp_enter', message: '已发送' };
+            console.log(`[SEND] Verified: Submitted successfully via cdp_enter (isSteer=${isSteerMode})`);
+            return { 
+                ok: true, 
+                isSteer: isSteerMode, 
+                method: 'cdp_enter', 
+                message: isSteerMode ? '⚡ 插话已成功介入引导' : '已发送' 
+            };
         }
         console.warn(`[SEND] cdp_enter did not clear editor (len: ${remaining.length}), trying Fiber handleEnter...`);
     } catch (e) {
@@ -875,8 +873,13 @@ async function injectMessage(cdp, text) {
             const remaining = await readEditorText();
             console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
             if (!remaining) {
-                console.log('[SEND] Verified: Submitted successfully via fiber_handleEnter');
-                return { ok: true, method: 'fiber_handleEnter', message: '已发送' };
+                console.log(`[SEND] Verified: Submitted successfully via fiber_handleEnter (isSteer=${isSteerMode})`);
+                return { 
+                    ok: true, 
+                    isSteer: isSteerMode, 
+                    method: 'fiber_handleEnter', 
+                    message: isSteerMode ? '⚡ 插话已成功介入引导' : '已发送' 
+                };
             }
         }
     } catch (e) { }
@@ -896,7 +899,7 @@ async function injectMessage(cdp, text) {
     return {
         ok: false,
         error: 'submit_failed',
-        message: '桌面端未响应提交，请检查桌面端状态'
+        message: isSteerMode ? '插话提交失败，桌面端未响应' : '桌面端未响应提交，请检查桌面端状态'
     };
 }
 
@@ -1833,6 +1836,10 @@ async function getAppState(cdp) {
             if (found) state.model = found.innerText.trim();
         }
 
+        // 3. Detect if the agent is actively executing
+        const cancelBtn = document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
+        state.isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
+
         return state;
     } catch (e) { return { error: e.toString() }; }
 })()`;
@@ -2166,8 +2173,8 @@ async function createServer() {
 
     // Send message
     app.post('/send', async (req, res) => {
-        const { message } = req.body;
-        console.log(`[HTTP POST /send] Received message: "${(message || '').slice(0, 60)}"`);
+        const { message, isSteer } = req.body;
+        console.log(`[HTTP POST /send] Received message: "${(message || '').slice(0, 60)}" (isSteer=${!!isSteer})`);
 
         if (!message) {
             console.warn('[HTTP POST /send] Empty message rejected');
@@ -2179,17 +2186,18 @@ async function createServer() {
             return res.status(503).json({ success: false, ok: false, error: 'CDP not connected', message: 'CDP未连接' });
         }
 
-        const result = await injectMessage(cdpConnection, message);
+        const result = await injectMessage(cdpConnection, message, { isSteer: !!isSteer });
         const isOk = result?.ok === true;
-        console.log(`[HTTP POST /send] Result: ok=${isOk}, error=${result.error || 'none'}, method=${result.method || 'none'}`);
+        console.log(`[HTTP POST /send] Result: ok=${isOk}, error=${result.error || 'none'}, method=${result.method || 'none'}, isSteer=${!!result.isSteer}`);
 
-        const statusCode = isOk ? 200 : (result.error === 'busy' ? 409 : 400);
+        const statusCode = isOk ? 200 : 400;
         res.status(statusCode).json({
             success: isOk,
             ok: isOk,
+            isSteer: !!result.isSteer,
             error: isOk ? undefined : (result.error || 'submit_failed'),
             method: result.method || (isOk ? 'unknown' : 'failed'),
-            message: result.message || (isOk ? '已发送' : '发送失败'),
+            message: result.message || (isOk ? (result.isSteer ? '⚡ 插话已成功介入引导' : '已发送') : '发送失败'),
             details: result
         });
     });

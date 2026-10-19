@@ -818,7 +818,72 @@ html, body {
     gap: 8px;
 }
 
-/* Quick Actions Bar */
+/* Steer / Interjection Notification Banner */
+.steer-status-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: linear-gradient(90deg, rgba(245, 158, 11, 0.16), rgba(139, 92, 246, 0.16));
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: var(--radius-md);
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: #fde68a;
+    animation: steer-glow 2s infinite alternate;
+}
+
+@keyframes steer-glow {
+    0% { border-color: rgba(245, 158, 11, 0.3); box-shadow: 0 0 4px rgba(245, 158, 11, 0.1); }
+    100% { border-color: rgba(245, 158, 11, 0.6); box-shadow: 0 0 10px rgba(245, 158, 11, 0.25); }
+}
+
+.steer-status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.steer-pulse-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    box-shadow: 0 0 8px #f59e0b;
+    animation: pulse 1.5s infinite;
+}
+
+/* Conversation Guidance Bar (对话引导) */
+.guidance-bar-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+
+.guidance-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2px;
+}
+
+.guidance-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.guidance-hint {
+    font-size: 10.5px;
+    color: var(--text-dim);
+}
+
 .quick-actions-bar {
     display: flex;
     gap: 8px;
@@ -835,7 +900,7 @@ html, body {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--border);
     color: var(--text-muted);
-    padding: 4px 10px;
+    padding: 5px 11px;
     border-radius: var(--radius-full);
     font-size: 11.5px;
     font-weight: 500;
@@ -843,12 +908,53 @@ html, body {
     cursor: pointer;
     transition: all var(--transition-fast);
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    user-select: none;
 }
 
 .action-chip:hover {
     background: rgba(255, 255, 255, 0.09);
     color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.16);
+    transform: translateY(-1px);
+}
+
+.action-chip:active {
+    transform: scale(0.96);
+}
+
+.action-chip.chip-continue {
+    background: rgba(99, 102, 241, 0.14);
+    border-color: rgba(99, 102, 241, 0.4);
+    color: #a5b4fc;
+    font-weight: 600;
+}
+
+.action-chip.chip-continue:hover {
+    background: rgba(99, 102, 241, 0.25);
+    color: #fff;
+    border-color: rgba(99, 102, 241, 0.6);
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.25);
+}
+
+.action-chip.chip-steer {
+    background: rgba(245, 158, 11, 0.14);
+    border-color: rgba(245, 158, 11, 0.4);
+    color: #fcd34d;
+    font-weight: 600;
+}
+
+.action-chip.chip-steer:hover {
+    background: rgba(245, 158, 11, 0.25);
+    color: #fff;
+    border-color: rgba(245, 158, 11, 0.6);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.25);
+}
+
+.chip-icon {
+    font-size: 12px;
 }
 
 /* Input Card */
@@ -867,6 +973,11 @@ html, body {
 .input-card:focus-within {
     border-color: var(--accent);
     box-shadow: 0 4px 24px var(--accent-glow);
+}
+
+.input-card.steer-focused {
+    border-color: #f59e0b;
+    box-shadow: 0 4px 24px rgba(245, 158, 11, 0.25);
 }
 
 .input-card textarea {
@@ -918,6 +1029,7 @@ html, body {
     box-shadow: 0 2px 8px var(--accent-glow);
     margin-left: auto;
     flex-shrink: 0;
+    gap: 5px;
 }
 
 .send-btn svg {
@@ -931,6 +1043,31 @@ html, body {
 
 .send-btn:active {
     transform: scale(0.92);
+}
+
+/* Steer Mode Button */
+.send-btn.steer-mode {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    box-shadow: 0 2px 12px rgba(245, 158, 11, 0.45);
+    width: auto;
+    min-width: 72px;
+    padding: 0 10px;
+}
+
+.send-btn.steer-mode:hover {
+    box-shadow: 0 4px 16px rgba(245, 158, 11, 0.6);
+    transform: scale(1.04);
+}
+
+.send-btn-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+    display: none;
+}
+
+.send-btn.steer-mode .send-btn-label {
+    display: inline;
 }
 
 /* ============================================================

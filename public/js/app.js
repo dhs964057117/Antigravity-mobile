@@ -54,6 +54,10 @@ const closeSupportBtn = document.getElementById('closeSupportBtn');
 const enableHttpsBtn = document.getElementById('enableHttpsBtn');
 const sslBanner = document.getElementById('sslBanner');
 const quickActionChips = document.querySelectorAll('.action-chip');
+const steerStatusBanner = document.getElementById('steerStatusBanner');
+const sendBtnIcon = document.getElementById('sendBtnIcon');
+const sendBtnLabel = document.getElementById('sendBtnLabel');
+const inputCard = document.getElementById('inputCard');
 
 // --- State Variables ---
 let autoRefreshEnabled = true;
@@ -64,10 +68,36 @@ let idleTimer = null;
 let currentMode = 'Turbo';
 let currentModel = 'Gemini 3.8 Flash High';
 let chatIsOpen = true;
+let isAgentBusy = false;
 let rawConversations = [];
 let availableModels = [];
 
 const USER_SCROLL_LOCK_DURATION = 3000;
+
+// --- Steer / Interjection Mode Management ---
+function setSteerMode(isBusy) {
+    isAgentBusy = !!isBusy;
+    if (isAgentBusy) {
+        if (steerStatusBanner) steerStatusBanner.style.display = 'flex';
+        sendBtn.classList.add('steer-mode');
+        sendBtn.title = '当前智能体正在执行，点击可直接「插话」实时干预引导';
+        if (sendBtnIcon) {
+            sendBtnIcon.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>`;
+        }
+        if (sendBtnLabel) sendBtnLabel.textContent = '插话';
+        messageInput.placeholder = '输入插话指令... (智能体将实时介入引导)';
+    } else {
+        if (steerStatusBanner) steerStatusBanner.style.display = 'none';
+        sendBtn.classList.remove('steer-mode');
+        sendBtn.title = '发送 (Enter)';
+        if (sendBtnIcon) {
+            sendBtnIcon.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>`;
+        }
+        if (sendBtnLabel) sendBtnLabel.textContent = '';
+        messageInput.placeholder = '输入消息... (Shift+Enter 换行, Enter 发送)';
+        if (inputCard) inputCard.classList.remove('steer-focused');
+    }
+}
 
 // --- Auth Utilities ---
 async function fetchWithAuth(url, options = {}) {
@@ -194,6 +224,10 @@ async function fetchAppState() {
         if (data.model && data.model !== 'Unknown') {
             currentModel = data.model;
             modelText.textContent = data.model;
+        }
+
+        if (data.isBusy !== undefined) {
+            setSteerMode(data.isBusy);
         }
     } catch (e) {
         console.warn('[SYNC] Failed to sync app state:', e.message);
@@ -526,6 +560,11 @@ pre {
         }
 
         addMobileCopyButtons();
+
+        // Update steer mode from snapshot stats or flags
+        if (typeof data.isBusy === 'boolean' || (data.stats && typeof data.stats.isBusy === 'boolean')) {
+            setSteerMode(!!(data.isBusy || (data.stats && data.stats.isBusy)));
+        }
 
         // Scroll positioning
         const newScrollHeight = chatContainer.scrollHeight;
@@ -1307,16 +1346,20 @@ modeModalOverlay.addEventListener('click', (e) => {
 });
 
 // --- Sending Messages ---
-async function sendMessage() {
-    const message = messageInput.value.trim();
+async function sendMessage(overrideText = null) {
+    const rawText = overrideText !== null ? overrideText : messageInput.value;
+    const message = rawText ? rawText.trim() : '';
     if (!message) return;
 
     const originalMessage = message;
+    const isSteerSubmission = isAgentBusy;
 
-    // Instantly clear textarea and blur virtual keyboard
-    messageInput.value = '';
-    messageInput.style.height = 'auto';
-    messageInput.blur();
+    // If using the input textarea, clear it immediately
+    if (overrideText === null) {
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        messageInput.blur();
+    }
 
     sendBtn.disabled = true;
     sendBtn.style.opacity = '0.5';
@@ -1330,30 +1373,41 @@ async function sendMessage() {
         const res = await fetchWithAuth('/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: originalMessage })
+            body: JSON.stringify({ 
+                message: originalMessage,
+                isSteer: isSteerSubmission
+            })
         });
 
         const data = await res.json().catch(() => null);
 
         if (!res.ok || !data || data.success === false || data.ok === false) {
-            // Restore input text so the user never loses their drafted message!
-            messageInput.value = originalMessage;
-            messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+            if (overrideText === null) {
+                // Restore input text so the user never loses their drafted message!
+                messageInput.value = originalMessage;
+                messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+            }
             
             const msg = data?.message || data?.error || '消息发送失败，请重试';
             showToast(msg, 'error');
             return;
         }
 
-        showToast('消息已发送', 'success', 1800);
+        if (data.isSteer) {
+            showToast('⚡ 插话已成功介入引导', 'success', 2200);
+        } else {
+            showToast('消息已发送', 'success', 1800);
+        }
 
         setTimeout(loadSnapshot, 300);
         setTimeout(loadSnapshot, 800);
         setTimeout(loadSidebarHistory, 1500);
     } catch (e) {
         console.error('Send message error:', e);
-        messageInput.value = originalMessage;
-        messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+        if (overrideText === null) {
+            messageInput.value = originalMessage;
+            messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+        }
         showToast('发送失败：网络连接异常，请重试', 'error');
     } finally {
         sendBtn.disabled = false;
@@ -1444,16 +1498,34 @@ if (window.visualViewport) {
     });
 }
 
-// --- Quick Actions ---
-quickActionChips.forEach(chip => {
-    chip.addEventListener('click', () => {
-        const text = chip.getAttribute('data-text') || chip.innerText.trim();
-        messageInput.value = text;
-        messageInput.focus();
-        messageInput.style.height = 'auto';
-        messageInput.style.height = messageInput.scrollHeight + 'px';
+// --- Quick Actions & Conversation Guidance ---
+function setupGuidanceChips() {
+    const chips = document.querySelectorAll('.action-chip');
+    chips.forEach(chip => {
+        chip.addEventListener('click', (e) => {
+            e.preventDefault();
+            const text = chip.getAttribute('data-text') || chip.innerText.trim();
+            const isDirect = chip.getAttribute('data-direct') === 'true';
+
+            if (isDirect) {
+                // Direct one-click send (e.g. "继续对话")
+                sendMessage(text);
+            } else {
+                // Prepend or set into message input
+                if (chip.getAttribute('data-action') === 'steer') {
+                    messageInput.value = text + ' ';
+                    if (inputCard) inputCard.classList.add('steer-focused');
+                } else {
+                    messageInput.value = text;
+                }
+                messageInput.focus();
+                messageInput.style.height = 'auto';
+                messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+            }
+        });
     });
-});
+}
+setupGuidanceChips();
 
 // --- Stop & Refresh Buttons ---
 stopBtn.addEventListener('click', async () => {
