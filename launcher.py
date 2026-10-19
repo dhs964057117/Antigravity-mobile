@@ -9,6 +9,7 @@ import argparse
 import logging
 import threading
 import urllib.request
+import ssl
 import re
 import atexit
 
@@ -278,19 +279,26 @@ def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None,
             print("❌ Error: 'cloudflared' binary not found. Please install it.")
             sys.exit(1)
 
-def start_tunnel_heartbeat(port, get_public_url, interval=30):
+def start_tunnel_heartbeat(port, get_public_url, protocol="http", interval=30):
     """
     Background worker that sends periodic /health pings locally and via public tunnel.
     Keeps stateful firewalls, mobile carrier NAT tables, and Cloudflare edge proxies warm and active.
     """
+    # Create SSL context that allows self-signed local certs
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
     def _worker():
         consecutive_fails = 0
         while True:
             time.sleep(interval)
             # 1. Local Node check
             try:
-                req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers={'User-Agent': 'AGY-Heartbeat/1.0'})
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                local_url = f"{protocol}://127.0.0.1:{port}/health"
+                req = urllib.request.Request(local_url, headers={'User-Agent': 'AGY-Heartbeat/1.0'})
+                ctx = ssl_ctx if protocol == "https" else None
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
                     pass
             except Exception:
                 pass
@@ -300,7 +308,7 @@ def start_tunnel_heartbeat(port, get_public_url, interval=30):
             if pub and not pub.startswith("http://localhost") and not pub.startswith("http://127.0.0.1") and "your-cloudflare-hostname" not in pub:
                 try:
                     req = urllib.request.Request(f"{pub.rstrip('/')}/health", headers={'User-Agent': 'AGY-Heartbeat/1.0'})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
+                    with urllib.request.urlopen(req, timeout=8, context=ssl_ctx) as resp:
                         if resp.status == 200:
                             consecutive_fails = 0
                 except Exception:
@@ -485,7 +493,7 @@ def main():
 
             # Shared active public URL container & background heartbeat keep-alive
             current_public_url = [public_url]
-            start_tunnel_heartbeat(port, lambda: current_public_url[0], interval=30)
+            start_tunnel_heartbeat(port, lambda: current_public_url[0], protocol=protocol, interval=30)
             
             # Magic URL with password
             final_url = f"{public_url}?key={passcode}"
