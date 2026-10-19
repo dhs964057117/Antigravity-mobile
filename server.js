@@ -533,7 +533,33 @@ async function injectMessage(cdp, text) {
 
     console.log(`[SEND] Processing message (chars: ${text.length})...`);
 
-    // Step 1: Locate editor inside Antigravity
+    // Step 1: Busy check - Check for active task cancellation button (Requirement B)
+    const BUSY_CHECK = `(async () => {
+        const cancelTask = document.querySelector('button[aria-label="Cancel Task"]') ||
+                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"]');
+        if (cancelTask && cancelTask.offsetParent !== null) {
+            return { busy: true, message: '桌面端正在执行任务，请稍候再发' };
+        }
+        return { busy: false };
+    })()`;
+
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: BUSY_CHECK,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: ctx.id
+            });
+            if (res.result?.value?.busy) {
+                console.warn('[SEND] Desktop Antigravity is busy running a task');
+                return { ok: false, error: 'busy', message: res.result.value.message || '桌面端正在执行任务，请稍候再发' };
+            }
+        } catch (e) { }
+    }
+
+    // Step 2: Locate editor inside Antigravity
     const LOCATE_EXP = `(async () => {
         const editors = [
             ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]'),
@@ -581,7 +607,7 @@ async function injectMessage(cdp, text) {
         return { ok: false, error: "editor_not_found", message: "未找到桌面端输入框" };
     }
 
-    // Step 2: Focus the editor via CDP mouse click to ensure native input focus
+    // Step 3: Focus the editor via CDP mouse click to ensure native input focus
     if (locateResult.pos && locateResult.pos.x > 0 && locateResult.pos.y > 0) {
         try {
             await cdp.call('Input.dispatchMouseEvent', {
@@ -603,7 +629,7 @@ async function injectMessage(cdp, text) {
         }
     }
 
-    // Step 3: Clear any existing text via CDP SelectAll (Ctrl+A) + Backspace
+    // Step 4: Clear any existing text via CDP SelectAll (Ctrl+A) + Backspace
     try {
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
@@ -613,7 +639,7 @@ async function injectMessage(cdp, text) {
         console.error('[SEND] CDP clear text error:', e);
     }
 
-    // Step 4: Insert text via CDP Input.insertText (native platform input handled by Chromium & Lexical)
+    // Step 5: Insert text via CDP Input.insertText (native platform input handled by Chromium & Lexical)
     try {
         await cdp.call('Input.insertText', { text });
         console.log('[SEND] Text inserted via CDP Input.insertText');
@@ -624,16 +650,36 @@ async function injectMessage(cdp, text) {
     // Small delay to allow Lexical / React to update internal state
     await new Promise(r => setTimeout(r, 120));
 
-    // Step 5: Submit the message!
+    // Helper: Read back editor text to verify submission (Requirement A)
+    const readEditorText = async () => {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: `(() => {
+                    const ed = document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
+                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [contenteditable="true"]') ||
+                               document.querySelector('[data-lexical-editor="true"]');
+                    return (ed?.innerText || '').trim();
+                })()`,
+                returnByValue: true,
+                contextId: targetContext.id
+            });
+            return res.result?.value ?? '';
+        } catch (e) {
+            return 'error';
+        }
+    };
+
+    // Step 6: Multi-tier submission with verified editor clearing (Requirement A)
+
     // Priority 1: Check if send button is available and click it
     const SUBMIT_EXP = `(async () => {
         const inputContainer = document.getElementById('antigravity.agentSidePanelInputBox') || document;
         const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
         if (sendBtn && !sendBtn.disabled) {
             sendBtn.click();
-            return { ok: true, method: 'click_submit' };
+            return { clicked: true };
         }
-        return { ok: false, reason: 'button_not_ready_or_disabled' };
+        return { clicked: false, disabled: !!(sendBtn && sendBtn.disabled) };
     })()`;
 
     try {
@@ -643,13 +689,18 @@ async function injectMessage(cdp, text) {
             awaitPromise: true,
             contextId: targetContext.id
         });
-        if (submitRes.result?.value?.ok) {
-            console.log('[SEND] Submitted via click_submit');
-            return submitRes.result.value;
+        if (submitRes.result?.value?.clicked) {
+            await new Promise(r => setTimeout(r, 250));
+            const remaining = await readEditorText();
+            if (!remaining) {
+                console.log('[SEND] Verified: Submitted successfully via click_submit');
+                return { ok: true, method: 'click_submit', message: '已发送' };
+            }
+            console.warn(`[SEND] click_submit did not clear editor (len: ${remaining.length}), trying CDP Enter...`);
         }
     } catch (e) { }
 
-    // Priority 2: Dispatch native Enter key via CDP (tested and confirmed working with Lexical!)
+    // Priority 2: Dispatch native Enter key via CDP
     try {
         await cdp.call('Input.dispatchKeyEvent', {
             type: 'keyDown',
@@ -663,8 +714,14 @@ async function injectMessage(cdp, text) {
             code: 'Enter',
             key: 'Enter'
         });
-        console.log('[SEND] Submitted via CDP Enter key');
-        return { ok: true, method: 'cdp_enter' };
+
+        await new Promise(r => setTimeout(r, 300));
+        const remaining = await readEditorText();
+        if (!remaining) {
+            console.log('[SEND] Verified: Submitted successfully via cdp_enter');
+            return { ok: true, method: 'cdp_enter', message: '已发送' };
+        }
+        console.warn(`[SEND] cdp_enter did not clear editor (len: ${remaining.length}), trying Fiber handleEnter...`);
     } catch (e) {
         console.error('[SEND] CDP enter key error:', e);
     }
@@ -682,7 +739,7 @@ async function injectMessage(cdp, text) {
                     const lex = curr.memoizedProps?.lexicalRef?.current;
                     if (lex) {
                         curr.memoizedProps.handleEnter(new KeyboardEvent('keydown', { key: 'Enter' }), lex);
-                        return { ok: true, method: 'fiber_handleEnter' };
+                        return { ok: true };
                     }
                 }
                 curr = curr.return;
@@ -701,13 +758,29 @@ async function injectMessage(cdp, text) {
             contextId: targetContext.id
         });
         if (fiberRes.result?.value?.ok) {
-            console.log('[SEND] Submitted via fiber_handleEnter');
-            return fiberRes.result.value;
+            await new Promise(r => setTimeout(r, 300));
+            const remaining = await readEditorText();
+            if (!remaining) {
+                console.log('[SEND] Verified: Submitted successfully via fiber_handleEnter');
+                return { ok: true, method: 'fiber_handleEnter', message: '已发送' };
+            }
         }
     } catch (e) { }
 
-    console.log('[SEND] Fallback attempted');
-    return { ok: true, method: 'attempted' };
+    // Clean up editor content on failure so half-typed text does not remain
+    try {
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
+    } catch (e) {}
+
+    console.error('[SEND] All submit methods failed: editor text was not cleared');
+    return {
+        ok: false,
+        error: 'submit_failed',
+        message: '桌面端未响应提交，请检查桌面端状态'
+    };
 }
 
 // Set functionality mode (Turbo / Default / Request Review / Fast / Planning)
@@ -1914,21 +1987,25 @@ async function createServer() {
 
         if (!message) {
             console.warn('[HTTP POST /send] Empty message rejected');
-            return res.status(400).json({ error: 'Message required' });
+            return res.status(400).json({ success: false, ok: false, error: 'Message required', message: '消息内容不能为空' });
         }
 
         if (!cdpConnection) {
             console.error('[HTTP POST /send] CDP not connected');
-            return res.status(503).json({ error: 'CDP not connected' });
+            return res.status(503).json({ success: false, ok: false, error: 'CDP not connected', message: 'CDP未连接' });
         }
 
         const result = await injectMessage(cdpConnection, message);
-        console.log(`[HTTP POST /send] Result: ok=${result.ok !== false}, method=${result.method}`);
+        const isOk = result?.ok === true;
+        console.log(`[HTTP POST /send] Result: ok=${isOk}, error=${result.error || 'none'}, method=${result.method || 'none'}`);
 
-        res.json({
-            success: result.ok !== false,
-            method: result.method || 'attempted',
-            message: result.message || (result.ok === false ? (result.reason || '发送失败') : '已发送'),
+        const statusCode = isOk ? 200 : (result.error === 'busy' ? 409 : 400);
+        res.status(statusCode).json({
+            success: isOk,
+            ok: isOk,
+            error: isOk ? undefined : (result.error || 'submit_failed'),
+            method: result.method || (isOk ? 'unknown' : 'failed'),
+            message: result.message || (isOk ? '已发送' : '发送失败'),
             details: result
         });
     });

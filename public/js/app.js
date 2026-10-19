@@ -199,6 +199,7 @@ async function fetchAppState() {
         console.warn('[SYNC] Failed to sync app state:', e.message);
     }
 }
+const syncAppState = fetchAppState;
 
 // --- WebSocket Connection ---
 let reconnectTimeout = null;
@@ -233,7 +234,7 @@ function connectWebSocket() {
         updateStatus(true);
         loadSnapshot();
         loadSidebarHistory();
-        syncAppState();
+        fetchAppState();
     };
 
     let snapshotDebounce = null;
@@ -273,7 +274,7 @@ document.addEventListener('visibilitychange', () => {
             // Screen unlocked: refresh snapshot & history to sync changes from desktop
             loadSnapshot(false);
             loadSidebarHistory();
-            syncAppState();
+            fetchAppState();
         }
     }
 });
@@ -1234,7 +1235,7 @@ async function sendMessage() {
 
         const data = await res.json().catch(() => null);
 
-        if (!res.ok || (data && data.success === false)) {
+        if (!res.ok || !data || data.success === false || data.ok === false) {
             // Restore input text so the user never loses their drafted message!
             messageInput.value = originalMessage;
             messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
@@ -1272,8 +1273,9 @@ sendBtn.addEventListener('touchend', (e) => {
     sendMessage();
 });
 
-// Keyboard handling: Enter sends; Shift+Enter creates new line
+// Keyboard handling: Enter sends; Shift+Enter creates new line (with IME composition guard)
 messageInput.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
