@@ -197,7 +197,7 @@ def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None,
     """
     if cf_token:
         print("PLEASE WAIT... Starting Persistent Cloudflare Tunnel via Token...", flush=True)
-        cf_cmd = [cf_bin, "tunnel", "run", "--token", cf_token]
+        cf_cmd = [cf_bin, "tunnel", "--protocol", "http2", "run", "--token", cf_token]
         if protocol == "https":
             cf_cmd.append("--no-tls-verify")
 
@@ -221,7 +221,7 @@ def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None,
 
     elif cf_name:
         print(f"PLEASE WAIT... Starting Persistent Cloudflare Tunnel: {cf_name}...", flush=True)
-        cf_cmd = [cf_bin, "tunnel", "run", cf_name]
+        cf_cmd = [cf_bin, "tunnel", "--protocol", "http2", "run", cf_name]
         public_url = custom_domain or os.environ.get('CLOUDFLARE_TUNNEL_URL')
         if not public_url:
             print("⚠️  Warning: CUSTOM_DOMAIN/CLOUDFLARE_TUNNEL_URL not set. QR Code might be placeholder.")
