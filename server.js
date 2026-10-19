@@ -533,12 +533,41 @@ async function injectMessage(cdp, text) {
 
     console.log(`[SEND] Processing message (chars: ${text.length})...`);
 
-    // Step 1: Busy check - Check for active task cancellation button (Requirement B)
+    // Step 1: Busy check - Check for active task cancellation button
     const BUSY_CHECK = `(async () => {
-        const cancelTask = document.querySelector('button[aria-label="Cancel Task"]') ||
-                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-tooltip-id="input-send-button-cancel-tooltip"]') ||
-                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"]');
-        if (cancelTask && cancelTask.offsetParent !== null) {
+        // Clear previous target markers
+        document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
+
+        const cascade = document.getElementById('conversation') || 
+                        document.getElementById('chat') || 
+                        document.getElementById('cascade') ||
+                        document.querySelector('.isolate.overflow-y-auto') ||
+                        document.querySelector('[class*="scrollbar-hide"][class*="overflow-y-auto"]');
+
+        const allEditors = Array.from(document.querySelectorAll('[data-lexical-editor="true"], [contenteditable="true"]'))
+            .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
+
+        let target = null;
+        let columnContainer = null;
+        if (cascade) {
+            let curr = cascade;
+            while (curr && curr !== document.body) {
+                target = allEditors.find(ed => curr.contains(ed));
+                if (target) {
+                    columnContainer = curr;
+                    break;
+                }
+                curr = curr.parentElement;
+            }
+        }
+        if (!target) target = allEditors[0];
+
+        // Check if the target's column or document has a Cancel Task button
+        const cancelBtn = columnContainer ? 
+            columnContainer.querySelector('button[aria-label="Cancel Task"], button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]') :
+            document.querySelector('button[aria-label="Cancel Task"], [data-tooltip-id="input-send-button-cancel-tooltip"], button[aria-label*="Cancel (Ctrl+D)"]');
+
+        if (cancelBtn && cancelBtn.offsetParent !== null) {
             return { busy: true, message: '桌面端正在执行任务，请稍候再发' };
         }
         return { busy: false };
@@ -559,26 +588,46 @@ async function injectMessage(cdp, text) {
         } catch (e) { }
     }
 
-    // Step 2: Locate editor inside Antigravity
+    // Step 2: Locate target editor inside Antigravity
     const LOCATE_EXP = `(async () => {
-        const editors = [
-            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]'),
-            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [contenteditable="true"]'),
-            ...document.querySelectorAll('[data-lexical-editor="true"]'),
-            ...document.querySelectorAll('[aria-label="Message input"]'),
-            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox textarea'),
-            ...document.querySelectorAll('[contenteditable="true"]')
-        ].filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
+        document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
 
-        const editor = editors[0] || editors.at(-1);
-        if (!editor) return { ok: false, error: "editor_not_found", message: "未找到输入框，请确认 Antigravity 界面正常打开" };
+        const cascade = document.getElementById('conversation') || 
+                        document.getElementById('chat') || 
+                        document.getElementById('cascade') ||
+                        document.querySelector('.isolate.overflow-y-auto') ||
+                        document.querySelector('[class*="scrollbar-hide"][class*="overflow-y-auto"]');
 
-        if (editor.focus) editor.focus();
+        const allEditors = Array.from(document.querySelectorAll('[data-lexical-editor="true"], [contenteditable="true"]'))
+            .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
 
-        const rect = editor.getBoundingClientRect();
+        if (allEditors.length === 0) {
+            return { ok: false, error: "editor_not_found", message: "未找到输入框，请确认 Antigravity 界面正常打开" };
+        }
+
+        let target = null;
+        if (cascade) {
+            let curr = cascade;
+            while (curr && curr !== document.body) {
+                target = allEditors.find(ed => curr.contains(ed));
+                if (target) break;
+                curr = curr.parentElement;
+            }
+        }
+        if (!target) {
+            target = allEditors.find(ed => {
+                const box = ed.closest('[id*="agentSidePanelInputBox"]') || ed.parentElement;
+                return box && box.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
+            }) || allEditors[0];
+        }
+
+        target.setAttribute('data-ag-active-target', 'true');
+        if (target.focus) target.focus();
+
+        const rect = target.getBoundingClientRect();
         return {
             ok: true,
-            isLexical: editor.getAttribute('data-lexical-editor') === 'true',
+            isLexical: target.getAttribute('data-lexical-editor') === 'true',
             pos: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
         };
     })()`;
@@ -607,7 +656,7 @@ async function injectMessage(cdp, text) {
         return { ok: false, error: "editor_not_found", message: "未找到桌面端输入框" };
     }
 
-    // Step 3: Focus the editor via CDP mouse click to ensure native input focus
+    // Step 3: Focus the editor via CDP mouse click, then verify and reinforce document.activeElement
     if (locateResult.pos && locateResult.pos.x > 0 && locateResult.pos.y > 0) {
         try {
             await cdp.call('Input.dispatchMouseEvent', {
@@ -629,6 +678,46 @@ async function injectMessage(cdp, text) {
         }
     }
 
+    // Verify document.activeElement and enforce focus if needed
+    try {
+        await cdp.call("Runtime.evaluate", {
+            expression: `(() => {
+                const target = document.querySelector('[data-ag-active-target="true"]') ||
+                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
+                               document.querySelector('[data-lexical-editor="true"]');
+                if (target && document.activeElement !== target && !target.contains(document.activeElement)) {
+                    target.focus();
+                    target.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                }
+            })()`,
+            returnByValue: true,
+            contextId: targetContext.id
+        });
+    } catch (e) { }
+
+    // Helper: Read back editor text from target editor
+    const readEditorText = async () => {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: `(() => {
+                    const ed = document.querySelector('[data-ag-active-target="true"]') ||
+                               (document.activeElement?.getAttribute('data-lexical-editor') === 'true' ? document.activeElement : null) ||
+                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
+                               document.querySelector('[data-lexical-editor="true"]');
+                    return (ed?.innerText || '').trim();
+                })()`,
+                returnByValue: true,
+                contextId: targetContext.id
+            });
+            return res.result?.value ?? '';
+        } catch (e) {
+            return '';
+        }
+    };
+
+    const before = await readEditorText();
+
     // Step 4: Clear any existing text via CDP SelectAll (Ctrl+A) + Backspace
     try {
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
@@ -639,7 +728,7 @@ async function injectMessage(cdp, text) {
         console.error('[SEND] CDP clear text error:', e);
     }
 
-    // Step 5: Insert text via CDP Input.insertText (native platform input handled by Chromium & Lexical)
+    // Step 5: Insert text via CDP Input.insertText
     try {
         await cdp.call('Input.insertText', { text });
         console.log('[SEND] Text inserted via CDP Input.insertText');
@@ -647,33 +736,44 @@ async function injectMessage(cdp, text) {
         console.error('[SEND] CDP insertText error:', e);
     }
 
-    // Small delay to allow Lexical / React to update internal state
-    await new Promise(r => setTimeout(r, 120));
+    await new Promise(r => setTimeout(r, 150));
 
-    // Helper: Read back editor text to verify submission (Requirement A)
-    const readEditorText = async () => {
+    let afterInsert = await readEditorText();
+
+    // If first insert failed, re-focus and retry once
+    if (!afterInsert || !afterInsert.includes(text.slice(0, 20))) {
+        console.warn('[SEND] First insert attempt failed, re-focusing and retrying...');
         try {
-            const res = await cdp.call("Runtime.evaluate", {
+            await cdp.call("Runtime.evaluate", {
                 expression: `(() => {
-                    const ed = document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
-                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [contenteditable="true"]') ||
-                               document.querySelector('[data-lexical-editor="true"]');
-                    return (ed?.innerText || '').trim();
+                    const target = document.querySelector('[data-ag-active-target="true"]') ||
+                                   document.querySelector('[data-lexical-editor="true"]');
+                    if (target) {
+                        target.focus();
+                        target.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+                    }
                 })()`,
-                returnByValue: true,
                 contextId: targetContext.id
             });
-            return res.result?.value ?? '';
-        } catch (e) {
-            return 'error';
-        }
-    };
+            await cdp.call('Input.insertText', { text });
+            await new Promise(r => setTimeout(r, 150));
+            afterInsert = await readEditorText();
+        } catch (e) { }
+    }
 
-    // Step 6: Multi-tier submission with verified editor clearing (Requirement A)
+    // 前置断言: 确保内容已被写入输入框，否则立即报错返回 insert_failed
+    if (!afterInsert || !afterInsert.includes(text.slice(0, 20))) {
+        console.error(`[SEND] Insert assertion failed: afterInsert="${afterInsert}", expected slice="${text.slice(0, 20)}"`);
+        return { ok: false, error: 'insert_failed', message: '未能写入桌面端输入框' };
+    }
+
+    // Step 6: Multi-tier submission with verified editor clearing and step-by-step logging
 
     // Priority 1: Check if send button is available and click it
     const SUBMIT_EXP = `(async () => {
-        const inputContainer = document.getElementById('antigravity.agentSidePanelInputBox') || document;
+        const target = document.querySelector('[data-ag-active-target="true"]');
+        const inputContainer = target?.closest('[id*="agentSidePanelInputBox"]') ||
+                               document.getElementById('antigravity.agentSidePanelInputBox') || document;
         const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
         if (sendBtn && !sendBtn.disabled) {
             sendBtn.click();
@@ -690,8 +790,9 @@ async function injectMessage(cdp, text) {
             contextId: targetContext.id
         });
         if (submitRes.result?.value?.clicked) {
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 350));
             const remaining = await readEditorText();
+            console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
             if (!remaining) {
                 console.log('[SEND] Verified: Submitted successfully via click_submit');
                 return { ok: true, method: 'click_submit', message: '已发送' };
@@ -703,10 +804,20 @@ async function injectMessage(cdp, text) {
     // Priority 2: Dispatch native Enter key via CDP
     try {
         await cdp.call('Input.dispatchKeyEvent', {
-            type: 'keyDown',
+            type: 'rawKeyDown',
             windowsVirtualKeyCode: 13,
             code: 'Enter',
-            key: 'Enter'
+            key: 'Enter',
+            unmodifiedText: '\r',
+            text: '\r'
+        });
+        await cdp.call('Input.dispatchKeyEvent', {
+            type: 'char',
+            windowsVirtualKeyCode: 13,
+            code: 'Enter',
+            key: 'Enter',
+            unmodifiedText: '\r',
+            text: '\r'
         });
         await cdp.call('Input.dispatchKeyEvent', {
             type: 'keyUp',
@@ -715,8 +826,9 @@ async function injectMessage(cdp, text) {
             key: 'Enter'
         });
 
-        await new Promise(r => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 400));
         const remaining = await readEditorText();
+        console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
         if (!remaining) {
             console.log('[SEND] Verified: Submitted successfully via cdp_enter');
             return { ok: true, method: 'cdp_enter', message: '已发送' };
@@ -729,16 +841,17 @@ async function injectMessage(cdp, text) {
     // Priority 3: Fallback to React Fiber handleEnter
     const FIBER_ENTER_EXP = `(async () => {
         try {
-            const box = document.getElementById('antigravity.agentSidePanelInputBox');
-            const editor = box ? box.querySelector('[contenteditable="true"]') : null;
-            if (!editor) return { ok: false };
-            const fiberKey = Object.keys(editor).find(k => k.startsWith('__reactFiber'));
-            let curr = editor[fiberKey];
+            const target = document.querySelector('[data-ag-active-target="true"]') ||
+                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
+                           document.querySelector('[data-lexical-editor="true"]');
+            if (!target) return { ok: false };
+            const fiberKey = Object.keys(target).find(k => k.startsWith('__reactFiber'));
+            let curr = target[fiberKey];
             while (curr) {
                 if (typeof curr.memoizedProps?.handleEnter === 'function') {
                     const lex = curr.memoizedProps?.lexicalRef?.current;
                     if (lex) {
-                        curr.memoizedProps.handleEnter(new KeyboardEvent('keydown', { key: 'Enter' }), lex);
+                        await curr.memoizedProps.handleEnter(new KeyboardEvent('keydown', { key: 'Enter' }), lex);
                         return { ok: true };
                     }
                 }
@@ -758,14 +871,18 @@ async function injectMessage(cdp, text) {
             contextId: targetContext.id
         });
         if (fiberRes.result?.value?.ok) {
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 400));
             const remaining = await readEditorText();
+            console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
             if (!remaining) {
                 console.log('[SEND] Verified: Submitted successfully via fiber_handleEnter');
                 return { ok: true, method: 'fiber_handleEnter', message: '已发送' };
             }
         }
     } catch (e) { }
+
+    const remaining = await readEditorText();
+    console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
 
     // Clean up editor content on failure so half-typed text does not remain
     try {
