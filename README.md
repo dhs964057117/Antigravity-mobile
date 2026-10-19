@@ -59,6 +59,16 @@
 * **会话消耗透视**：直观展示对话轮次 (Turns)、估算消耗 Tokens、上下文利用率渐变进度条、渲染 DOM 节点数及网络载荷。
 * **配额与限制速查**：汇总各模型的速率限制（RPM/TPM）及重置机制，配合服务健康度（Uptime、内存、WebSocket 实时信道）全景看板。
 
+### 11. 🌐 固定自定义域名支持 (Cloudflare Zero Trust Named Tunnel)
+* **地址永久不变**：支持绑定 Cloudflare Zero Trust 免费 Token (`CLOUDFLARE_TUNNEL_TOKEN`) 与自定义独立域名 (`CUSTOM_DOMAIN`，如 `https://agent.yourdomain.com`)。
+* **免除反复扫码**：告别临时隧道每次重启更换随机域名的痛点，手机可直接添加到桌面 PWA 或浏览器书签，永久无感直达。
+
+### 12. 🛡️ 主动拉起自愈与全天候保活 (Auto-Healing Watchdog & Overnight Keep-Alive)
+* **崩溃主动拉起**：守护进程实时监控后台 Node 服务与 Cloudflare 隧道，异常退出或中断时 3 秒内主动自动拉起自愈。
+* **Windows 防休眠保活**：调用 Windows 核心电源管理 API (`SetThreadExecutionState`)，防止电脑长时间无操作后夜间休眠或网卡断电。
+* **双层防掉线心跳**：25s 原生 WebSocket Ping/Pong 穿透 Cloudflare 100s 空闲切断限制；30s 后台 HTTP 心跳维持路由器与移动基站 NAT 会话活跃。
+* **手机解锁即连**：移动端集成 `visibilitychange` 事件流，锁屏解锁或切换回标签页瞬间自动重连并刷新工作区，告别僵尸假死。
+
 ---
 
 ## 🚀 Quick Start
@@ -130,12 +140,28 @@ You can use **ngrok** (requires account), **Cloudflare Tunnel** (requires `cloud
    NGROK_AUTHTOKEN=your_token_here
    ```
 
-#### Option B: Cloudflare Tunnel
-1. **Install cloudflared**: Follow the [official guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started-guide/local/instance/install-run/) to install `cloudflared` on your system.
-2. **Setup**: Update your `.env` file:
-   ```env
-   TUNNEL_PROVIDER=cloudflare
-   ```
+#### Option B: Cloudflare Tunnel (推荐 / Recommended)
+1. **安装 cloudflared**：项目内置了 Windows `cloudflared.exe`，其他系统可参考 [Cloudflare 官方指引](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started-guide/local/instance/install-run/) 安装。
+2. **选择模式**：
+   - **模式 1：开箱即用临时隧道 (无需注册)**
+     在 `.env` 中设置：
+     ```env
+     TUNNEL_PROVIDER=cloudflare
+     ```
+     启动时将自动分配免费的 `*.trycloudflare.com` 临时公网地址。
+   - **模式 2：固定永久独立域名 (推荐，永不变动)**
+     通过 Cloudflare Zero Trust 免费为自己的域名分配固定通道：
+     1. 登录 [Cloudflare Zero Trust 控制台](https://one.dash.cloudflare.com)。
+     2. 依次点击：**Networks** → **Tunnels** → **Create a tunnel** → 选择 **Cloudflared**。
+     3. 复制控制台生成的 **Tunnel Token**（一长串 Base64 密钥）。
+     4. 在后台 **Public Hostname** 中添加公网域名（例如 `agent.yourdomain.com`，Service 选择 `HTTP` 指向 `localhost:3000`）。
+     5. 在项目 `.env` 中填入：
+        ```env
+        TUNNEL_PROVIDER=cloudflare
+        CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...你的Token...
+        CUSTOM_DOMAIN=https://agent.yourdomain.com
+        ```
+     配置完成后，无论重启多少次，外网访问地址永久固定为你的域名，手机添加到书签或主屏幕桌面永不失效！
 
 #### Option C: Pinggy Tunnel
 1. **No Install Required**: Pinggy works via SSH and the Python SDK. The launcher will automatically install the `pinggy` pip package.

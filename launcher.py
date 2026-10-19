@@ -7,6 +7,10 @@ import os
 import socket
 import argparse
 import logging
+import threading
+import urllib.request
+import re
+import atexit
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -132,6 +136,182 @@ def print_qr(url):
         pass
 
 # -----------------------------------------------------------------------------
+# System Power & Watchdog Helpers
+# -----------------------------------------------------------------------------
+def prevent_system_sleep():
+    """Keeps the system and network awake while the remote server is running."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_AWAYMODE_REQUIRED = 0x00000040
+            res = ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+            )
+            if res:
+                print("🛡️  Windows 防休眠保活已启动（锁屏或无操作时系统将保持运行，防止网络断开）。", flush=True)
+        except Exception as e:
+            print(f"⚠️  Windows 防休眠设置失败: {e}", flush=True)
+
+def restore_system_sleep():
+    """Restores default system sleep settings upon shutdown."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+        except Exception:
+            pass
+
+def find_cloudflared_bin():
+    """Locates the cloudflared executable."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloudflared.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "cloudflared.exe"),
+        os.path.join(os.getcwd(), "cloudflared.exe"),
+        os.path.join(os.getcwd(), "bin", "cloudflared.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return "cloudflared"
+
+def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None, custom_domain=None):
+    """
+    Starts Cloudflare Tunnel.
+    Priority 1: Token-based Named Tunnel (cloudflared tunnel run --token <token>)
+    Priority 2: Config/Named Tunnel (cloudflared tunnel run <name>)
+    Priority 3: Ephemeral TryCloudflare tunnel (--url <addr>)
+    Returns (cf_process, public_url).
+    """
+    if cf_token:
+        print("PLEASE WAIT... Starting Persistent Cloudflare Tunnel via Token...", flush=True)
+        cf_cmd = [cf_bin, "tunnel", "run", "--token", cf_token]
+        if protocol == "https":
+            cf_cmd.append("--no-tls-verify")
+
+        public_url = custom_domain
+        if not public_url:
+            print("⚠️  Warning: CLOUDFLARE_TUNNEL_TOKEN is set, but CUSTOM_DOMAIN is not specified in .env.")
+            print("    Please set CUSTOM_DOMAIN=https://your-domain.com for accurate QR code generation.")
+            public_url = "https://your-cloudflare-hostname.com"
+        elif not public_url.startswith("http://") and not public_url.startswith("https://"):
+            public_url = f"https://{public_url}"
+
+        try:
+            cf_process = subprocess.Popen(cf_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2)
+            if cf_process.poll() is not None:
+                raise RuntimeError(f"cloudflared exited immediately with code {cf_process.returncode}")
+            return cf_process, public_url
+        except FileNotFoundError:
+            print("❌ Error: 'cloudflared' binary not found.")
+            sys.exit(1)
+
+    elif cf_name:
+        print(f"PLEASE WAIT... Starting Persistent Cloudflare Tunnel: {cf_name}...", flush=True)
+        cf_cmd = [cf_bin, "tunnel", "run", cf_name]
+        public_url = custom_domain or os.environ.get('CLOUDFLARE_TUNNEL_URL')
+        if not public_url:
+            print("⚠️  Warning: CUSTOM_DOMAIN/CLOUDFLARE_TUNNEL_URL not set. QR Code might be placeholder.")
+            public_url = "https://your-cloudflare-hostname.com"
+        elif not public_url.startswith("http://") and not public_url.startswith("https://"):
+            public_url = f"https://{public_url}"
+
+        try:
+            cf_process = subprocess.Popen(cf_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2)
+            if cf_process.poll() is not None:
+                raise RuntimeError(f"cloudflared exited immediately with code {cf_process.returncode}")
+            return cf_process, public_url
+        except FileNotFoundError:
+            print("❌ Error: 'cloudflared' binary not found.")
+            sys.exit(1)
+
+    else:
+        # Ephemeral TryCloudflare Quick Tunnel
+        print("PLEASE WAIT... Establishing Ephemeral Cloudflare Tunnel...", flush=True)
+        print("⏳ Connecting to Cloudflare edge network (typically takes 5-15s)...", flush=True)
+        cf_cmd = [cf_bin, "tunnel", "--url", addr, "--protocol", "http2"]
+        if protocol == "https":
+            cf_cmd.append("--no-tls-verify")
+
+        try:
+            cf_process = subprocess.Popen(
+                cf_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            start_time = time.time()
+            timeout = 60  # seconds
+            public_url = None
+
+            while time.time() - start_time < timeout:
+                line = cf_process.stdout.readline()
+                if not line:
+                    break
+
+                line_str = line.strip()
+                if "Requesting new quick tunnel" in line_str:
+                    print("   → Requesting tunnel assignment from Cloudflare...", flush=True)
+                elif "Registered tunnel connection" in line_str:
+                    print("   → Edge connection established...", flush=True)
+
+                if ".trycloudflare.com" in line:
+                    match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+                    if match:
+                        public_url = match.group(0)
+                        break
+
+            if not public_url:
+                if cf_process.poll() is not None:
+                    raise RuntimeError(f"cloudflared process terminated with code {cf_process.returncode}")
+                cf_process.terminate()
+                raise RuntimeError("Failed to obtain a TryCloudflare URL within 60s timeout.")
+
+            return cf_process, public_url
+        except FileNotFoundError:
+            print("❌ Error: 'cloudflared' binary not found. Please install it.")
+            sys.exit(1)
+
+def start_tunnel_heartbeat(port, get_public_url, interval=30):
+    """
+    Background worker that sends periodic /health pings locally and via public tunnel.
+    Keeps stateful firewalls, mobile carrier NAT tables, and Cloudflare edge proxies warm and active.
+    """
+    def _worker():
+        consecutive_fails = 0
+        while True:
+            time.sleep(interval)
+            # 1. Local Node check
+            try:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/health", headers={'User-Agent': 'AGY-Heartbeat/1.0'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    pass
+            except Exception:
+                pass
+
+            # 2. Public tunnel check
+            pub = get_public_url()
+            if pub and not pub.startswith("http://localhost") and not pub.startswith("http://127.0.0.1") and "your-cloudflare-hostname" not in pub:
+                try:
+                    req = urllib.request.Request(f"{pub.rstrip('/')}/health", headers={'User-Agent': 'AGY-Heartbeat/1.0'})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        if resp.status == 200:
+                            consecutive_fails = 0
+                except Exception:
+                    consecutive_fails += 1
+                    if consecutive_fails == 6:
+                        print("\n⚠️ [Heartbeat] Warning: 6 consecutive remote tunnel pings failed. Mobile connection may be degraded.", flush=True)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+# -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 def main():
@@ -148,6 +328,12 @@ def main():
 
     # Load .env if it exists
     load_dotenv()
+
+    # Prevent system sleep / screen-off network suspension (Enabled by default)
+    prevent_sleep = os.environ.get('PREVENT_SLEEP', 'true').strip().lower() in ('true', '1', 'yes')
+    if prevent_sleep:
+        prevent_system_sleep()
+        atexit.register(restore_system_sleep)
 
     # Determine Provider
     provider = args.provider or os.environ.get('TUNNEL_PROVIDER', 'ngrok').lower()
@@ -263,86 +449,23 @@ def main():
                     sys.exit(1)
 
             elif provider == 'cloudflare':
-                # Locate cloudflared binary
-                cf_bin = "cloudflared"
-                for candidate in [
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloudflared.exe"),
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "cloudflared.exe"),
-                    os.path.join(os.getcwd(), "cloudflared.exe"),
-                    os.path.join(os.getcwd(), "bin", "cloudflared.exe"),
-                ]:
-                    if os.path.exists(candidate):
-                        cf_bin = candidate
-                        break
-
+                cf_bin = find_cloudflared_bin()
+                cf_token = os.environ.get('CLOUDFLARE_TUNNEL_TOKEN')
                 cf_name = os.environ.get('CLOUDFLARE_TUNNEL_NAME') or os.environ.get('CLOUDFLARE_TUNNEL_ID')
-                cf_custom_url = os.environ.get('CLOUDFLARE_TUNNEL_URL')
+                custom_domain = os.environ.get('CUSTOM_DOMAIN') or os.environ.get('CLOUDFLARE_TUNNEL_URL')
 
-                if cf_name:
-                    print(f"PLEASE WAIT... Starting Persistent Cloudflare Tunnel: {cf_name}...")
-                    cf_cmd = [cf_bin, "tunnel", "run", cf_name]
-                    public_url = cf_custom_url
-                    
-                    if not public_url:
-                        print("⚠️  Warning: CLOUDFLARE_TUNNEL_URL not set. QR Code might be incorrect.")
-                        public_url = "https://your-cloudflare-hostname.com"
-                    
-                    try:
-                        cf_process = subprocess.Popen(cf_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        time.sleep(2)
-                    except FileNotFoundError:
-                        print("❌ Error: 'cloudflared' binary not found.")
-                        sys.exit(1)
-                else:
-                    print("PLEASE WAIT... Establishing Ephemeral Cloudflare Tunnel...", flush=True)
-                    print("⏳ Connecting to Cloudflare edge network (typically takes 5-15s)...", flush=True)
-                    cf_cmd = [cf_bin, "tunnel", "--url", addr, "--protocol", "http2"]
-                    
-                    if protocol == "https":
-                        cf_cmd.append("--no-tls-verify")
-                    
-                    try:
-                        cf_process = subprocess.Popen(
-                            cf_cmd, 
-                            stdout=subprocess.PIPE, 
-                            stderr=subprocess.STDOUT, 
-                            text=True, 
-                            bufsize=1, 
-                            universal_newlines=True
-                        )
-                        
-                        start_time = time.time()
-                        timeout = 60 # seconds
-                        
-                        while time.time() - start_time < timeout:
-                            line = cf_process.stdout.readline()
-                            if not line:
-                                break
-                            
-                            line_str = line.strip()
-                            if "Requesting new quick tunnel" in line_str:
-                                print("   → Requesting tunnel assignment from Cloudflare...", flush=True)
-                            elif "Registered tunnel connection" in line_str:
-                                print("   → Edge connection established...", flush=True)
-
-                            if ".trycloudflare.com" in line:
-                                import re
-                                match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                                if match:
-                                    public_url = match.group(0)
-                                    break
-                        
-                        if not public_url:
-                            print("❌ Failed to find Cloudflare Tunnel URL. Check internet connectivity.", flush=True)
-                            cf_process.terminate()
-                            sys.exit(1)
-                            
-                    except FileNotFoundError:
-                        print("❌ Error: 'cloudflared' binary not found. Please install it.")
-                        sys.exit(1)
-                    except Exception as e:
-                        print(f"❌ Failed to start Cloudflare Tunnel: {e}")
-                        sys.exit(1)
+                try:
+                    cf_process, public_url = start_cloudflare_tunnel(
+                        cf_bin=cf_bin,
+                        addr=addr,
+                        protocol=protocol,
+                        cf_token=cf_token,
+                        cf_name=cf_name,
+                        custom_domain=custom_domain
+                    )
+                except Exception as e:
+                    print(f"❌ Failed to start Cloudflare Tunnel: {e}")
+                    sys.exit(1)
             else:
                 # Default to Ngrok
                 # Check Ngrok Token
@@ -353,8 +476,16 @@ def main():
                     print("⚠️  Warning: NGROK_AUTHTOKEN not found in .env. Tunnel might expire.")
 
                 print("PLEASE WAIT... Establishing Ngrok Tunnel...")
-                tunnel = ngrok.connect(addr, host_header="rewrite")
+                ngrok_domain = os.environ.get('NGROK_DOMAIN') or os.environ.get('CUSTOM_DOMAIN')
+                if ngrok_domain:
+                    tunnel = ngrok.connect(addr, host_header="rewrite", domain=ngrok_domain)
+                else:
+                    tunnel = ngrok.connect(addr, host_header="rewrite")
                 public_url = tunnel.public_url
+
+            # Shared active public URL container & background heartbeat keep-alive
+            current_public_url = [public_url]
+            start_tunnel_heartbeat(port, lambda: current_public_url[0], interval=30)
             
             # Magic URL with password
             final_url = f"{public_url}?key={passcode}"
@@ -388,7 +519,7 @@ def main():
         while True:
             time.sleep(1)
             
-            # Check process status
+            # Check Node.js process status
             if node_process.poll() is not None:
                 if node_process.returncode == 0:
                     break
@@ -400,6 +531,33 @@ def main():
                 except Exception as restart_err:
                     print(f"\n❌ Server process died: {restart_err}")
                     sys.exit(1)
+
+            # Check Cloudflare tunnel process status (Auto-healing Watchdog)
+            if args.mode == 'web' and provider == 'cloudflare' and 'cf_process' in locals() and cf_process is not None:
+                if cf_process.poll() is not None:
+                    exit_code = cf_process.returncode
+                    print(f"\n⚠️ [Watchdog] Cloudflare 隧道进程异常退出 (退出码 {exit_code})，正在于 3 秒后主动拉起重启...", flush=True)
+                    time.sleep(3)
+                    try:
+                        cf_process, new_url = start_cloudflare_tunnel(
+                            cf_bin=cf_bin,
+                            addr=addr,
+                            protocol=protocol,
+                            cf_token=cf_token,
+                            cf_name=cf_name,
+                            custom_domain=custom_domain
+                        )
+                        if new_url:
+                            if new_url != public_url:
+                                public_url = new_url
+                                current_public_url[0] = public_url
+                                final_url = f"{public_url}?key={passcode}"
+                                print(f"🔄 [Watchdog] 隧道已自动拉起，新访问地址: {public_url}", flush=True)
+                                print_qr(final_url)
+                            else:
+                                print(f"✅ [Watchdog] 隧道已成功重新拉起 -> {public_url}", flush=True)
+                    except Exception as cf_err:
+                        print(f"❌ [Watchdog] 隧道自动拉起失败: {cf_err}", flush=True)
                 
             # Monitor logs for errors
             try:
@@ -430,6 +588,9 @@ def main():
         print(f"\n❌ Error: {e}")
         sys.exit(1)
     finally:
+        # Restore normal power management
+        restore_system_sleep()
+
         # Cleanup
         try:
             if 'node_process' in locals() and node_process:

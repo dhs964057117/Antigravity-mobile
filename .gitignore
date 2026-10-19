@@ -52,3 +52,5 @@ share/
 cloudflared.exe
 qrcode.png
 scratch/
+__pycache__/
+*.pyc

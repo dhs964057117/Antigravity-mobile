@@ -157,14 +157,39 @@ async function fetchAppState() {
 }
 
 // --- WebSocket Connection ---
+let reconnectTimeout = null;
+
+function scheduleReconnect(delay = 2000) {
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(() => {
+        connectWebSocket();
+    }, delay);
+}
+
 function connectWebSocket() {
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+        return;
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}`);
+    try {
+        ws = new WebSocket(`${protocol}//${window.location.host}`);
+    } catch (err) {
+        console.warn('WebSocket init error:', err);
+        scheduleReconnect(3000);
+        return;
+    }
 
     ws.onopen = () => {
         updateStatus(true);
         loadSnapshot();
         loadSidebarHistory();
+        syncAppState();
     };
 
     let snapshotDebounce = null;
@@ -186,9 +211,33 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         updateStatus(false);
-        setTimeout(connectWebSocket, 2000);
+        scheduleReconnect(2000);
+    };
+
+    ws.onerror = () => {
+        updateStatus(false);
     };
 }
+
+// Auto-reconnect and refresh immediately when mobile screen turns on / tab gains focus
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+            console.log('📱 Phone screen unlocked / tab active, reconnecting...');
+            connectWebSocket();
+        } else if (ws.readyState === WebSocket.OPEN) {
+            // Screen unlocked: refresh snapshot & history to sync changes from desktop
+            loadSnapshot(false);
+            loadSidebarHistory();
+            syncAppState();
+        }
+    }
+});
+
+window.addEventListener('online', () => {
+    console.log('🌐 Network online detected, reconnecting...');
+    connectWebSocket();
+});
 
 function updateStatus(connected) {
     if (connected) {

@@ -2005,7 +2005,31 @@ async function createServer() {
     });
 
     // WebSocket connection with Auth check
+    // RFC 6455 Ping/Pong keep-alive: prevents Cloudflare (100s idle timeout) and carrier NAT drops
+    const pingInterval = setInterval(() => {
+        wss.clients.forEach((ws) => {
+            if (ws.isAlive === false) {
+                console.log('📱 Terminating dead WebSocket client (heartbeat missed)');
+                return ws.terminate();
+            }
+            ws.isAlive = false;
+            try {
+                ws.ping();
+            } catch (err) {}
+        });
+    }, 25000);
+
+    wss.on('close', () => {
+        clearInterval(pingInterval);
+    });
+
     wss.on('connection', (ws, req) => {
+        // Track heartbeat state
+        ws.isAlive = true;
+        ws.on('pong', () => {
+            ws.isAlive = true;
+        });
+
         // Parse cookies from headers
         const rawCookies = req.headers.cookie || '';
         const parsedCookies = {};
