@@ -87,6 +87,50 @@ async function fetchWithAuth(url, options = {}) {
     }
 }
 
+// --- Global Toast Notification ---
+function showToast(message, type = 'info', duration = 3500) {
+    let container = document.getElementById('toastContainer');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toastContainer';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `toast-msg toast-${type}`;
+
+    let iconSvg = '';
+    if (type === 'warning') {
+        iconSvg = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    } else if (type === 'error') {
+        iconSvg = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+    } else if (type === 'success') {
+        iconSvg = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
+    } else {
+        iconSvg = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`;
+    }
+
+    toast.innerHTML = `
+        <span class="toast-icon">${iconSvg}</span>
+        <span class="toast-text">${message}</span>
+        <button class="toast-close" aria-label="关闭">×</button>
+    `;
+
+    const closeBtn = toast.querySelector('.toast-close');
+    const dismiss = () => {
+        toast.classList.add('toast-out');
+        setTimeout(() => toast.remove(), 260);
+    };
+
+    closeBtn.addEventListener('click', dismiss);
+    if (duration > 0) {
+        setTimeout(dismiss, duration);
+    }
+
+    container.appendChild(toast);
+}
+
 // --- Responsive Sidebar Controller ---
 function isDesktop() {
     return window.innerWidth >= 768;
@@ -1166,9 +1210,8 @@ async function sendMessage() {
     const message = messageInput.value.trim();
     if (!message) return;
 
-    messageInput.value = '';
-    messageInput.style.height = 'auto';
-    if (!isDesktop()) messageInput.blur();
+    // Preserve original message in case sending fails
+    const originalMessage = message;
 
     sendBtn.disabled = true;
     sendBtn.style.opacity = '0.5';
@@ -1179,17 +1222,39 @@ async function sendMessage() {
             await new Promise(r => setTimeout(r, 600));
         }
 
-        await fetchWithAuth('/send', {
+        const res = await fetchWithAuth('/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message })
+            body: JSON.stringify({ message: originalMessage })
         });
+
+        const data = await res.json().catch(() => null);
+
+        if (!res.ok || (data && data.success === false)) {
+            // Restore input text so the user never loses their drafted message!
+            messageInput.value = originalMessage;
+            
+            const reason = data?.details?.reason || data?.error || '';
+            const msg = data?.message || (reason === 'busy' 
+                ? 'AI 正在生成中，请等待上一轮完成或点击顶部“停止”后再发' 
+                : '消息发送失败，请重试');
+            
+            showToast(msg, reason === 'busy' ? 'warning' : 'error');
+            return;
+        }
+
+        // Successfully dispatched! Clear input
+        messageInput.value = '';
+        messageInput.style.height = 'auto';
+        if (!isDesktop()) messageInput.blur();
 
         setTimeout(loadSnapshot, 300);
         setTimeout(loadSnapshot, 800);
         setTimeout(loadSidebarHistory, 1500);
     } catch (e) {
         console.error('Send message error:', e);
+        messageInput.value = originalMessage;
+        showToast('发送失败：网络连接异常，请重试', 'error');
     } finally {
         sendBtn.disabled = false;
         sendBtn.style.opacity = '1';
@@ -1198,11 +1263,13 @@ async function sendMessage() {
 
 sendBtn.addEventListener('click', sendMessage);
 
-// Keyboard handling: Enter sends on desktop; Shift+Enter creates new line
+// Keyboard handling: Enter sends on desktop; Shift+Enter creates new line; On mobile Enter inserts newline
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
+        if (isDesktop()) {
+            e.preventDefault();
+            sendMessage();
+        }
     }
 });
 
@@ -1283,9 +1350,17 @@ quickActionChips.forEach(chip => {
 stopBtn.addEventListener('click', async () => {
     stopBtn.style.opacity = '0.5';
     try {
-        await fetchWithAuth('/stop', { method: 'POST' });
+        const res = await fetchWithAuth('/stop', { method: 'POST' });
+        const data = await res.json().catch(() => null);
+        if (data?.success) {
+            showToast('已发送停止生成请求', 'info');
+        } else {
+            showToast(data?.error || '未检测到正在生成的任务', 'info');
+        }
         setTimeout(loadSnapshot, 400);
-    } catch (e) {}
+    } catch (e) {
+        showToast('停止请求失败', 'error');
+    }
     setTimeout(() => stopBtn.style.opacity = '1', 500);
 });
 

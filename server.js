@@ -527,63 +527,199 @@ async function captureSnapshot(cdp) {
 
 // Inject message into Antigravity
 async function injectMessage(cdp, text) {
-    // Use JSON.stringify for robust escaping (handles ", \, newlines, backticks, unicode, etc.)
-    const safeText = JSON.stringify(text);
+    if (!text || typeof text !== 'string') {
+        return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
+    }
 
-    const EXPRESSION = `(async () => {
-        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') || document.querySelector('button[aria-label*="Cancel"], button[aria-label*="取消"]');
-        if (cancel && cancel.offsetParent !== null) return { ok:false, reason:"busy" };
-
-        const editors = [...document.querySelectorAll('#antigravity\\.agentSidePanelInputBox [contenteditable="true"], [contenteditable="true"], #conversation [contenteditable="true"], #chat [contenteditable="true"], #cascade [contenteditable="true"]')]
-            .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
-        const editor = editors.at(-1);
-        if (!editor) return { ok:false, error:"editor_not_found" };
-
-        const textToInsert = ${safeText};
-
-        editor.focus();
-        document.execCommand?.("selectAll", false, null);
-        document.execCommand?.("delete", false, null);
-
-        let inserted = false;
-        try { inserted = !!document.execCommand?.("insertText", false, textToInsert); } catch {}
-        if (!inserted) {
-            editor.textContent = textToInsert;
-            editor.dispatchEvent(new InputEvent("beforeinput", { bubbles:true, inputType:"insertText", data: textToInsert }));
-            editor.dispatchEvent(new InputEvent("input", { bubbles:true, inputType:"insertText", data: textToInsert }));
-        }
-
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-
-        const submit = document.querySelector("#antigravity\\.agentSidePanelInputBox button[aria-label*='Send'], #antigravity\\.agentSidePanelInputBox button[aria-label*='发送'], svg.lucide-arrow-right")?.closest("button");
-        if (submit && !submit.disabled) {
-            submit.click();
-            return { ok:true, method:"click_submit" };
-        }
-
-        // Submit button not found, trigger Enter key
-        editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles:true, cancelable:true, key:"Enter", code:"Enter", keyCode:13, which:13 }));
-        editor.dispatchEvent(new KeyboardEvent("keyup", { bubbles:true, cancelable:true, key:"Enter", code:"Enter", keyCode:13, which:13 }));
+    // Step 1: Check busy state and locate editor inside Antigravity
+    const CHECK_AND_LOCATE = `(async () => {
+        // 1. Precise busy check: Check ONLY inside the input container for an active cancel/stop button
+        const inputContainer = document.getElementById('antigravity.agentSidePanelInputBox') || 
+                               document.querySelector('.agentSidePanelInputBox') ||
+                               document.querySelector('[data-lexical-editor="true"]')?.closest('div.relative');
         
-        return { ok:true, method:"enter_keypress" };
+        const cancelBtn = inputContainer ? (
+            inputContainer.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
+            inputContainer.querySelector('button[aria-label*="Cancel (Ctrl+D)"]')
+        ) : null;
+
+        if (cancelBtn && cancelBtn.offsetParent !== null) {
+            return { ok: false, reason: "busy", message: "AI 正在回答中，请稍候再发" };
+        }
+
+        // 2. Locate editor
+        const editors = [
+            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]'),
+            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [contenteditable="true"]'),
+            ...document.querySelectorAll('[data-lexical-editor="true"]'),
+            ...document.querySelectorAll('[aria-label="Message input"]'),
+            ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox textarea'),
+            ...document.querySelectorAll('[contenteditable="true"]')
+        ].filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
+
+        const editor = editors[0] || editors.at(-1);
+        if (!editor) return { ok: false, error: "editor_not_found", message: "未找到输入框，请确认 Antigravity 界面正常打开" };
+
+        if (editor.focus) editor.focus();
+
+        const rect = editor.getBoundingClientRect();
+        return {
+            ok: true,
+            isLexical: editor.getAttribute('data-lexical-editor') === 'true',
+            pos: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        };
     })()`;
+
+    let locateResult = null;
+    let targetContext = null;
 
     for (const ctx of cdp.contexts) {
         try {
-            const result = await cdp.call("Runtime.evaluate", {
-                expression: EXPRESSION,
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: CHECK_AND_LOCATE,
                 returnByValue: true,
                 awaitPromise: true,
                 contextId: ctx.id
             });
-
-            if (result.result && result.result.value) {
-                return result.result.value;
+            if (res.result?.value) {
+                if (res.result.value.reason === 'busy') {
+                    return res.result.value;
+                }
+                if (res.result.value.ok) {
+                    locateResult = res.result.value;
+                    targetContext = ctx;
+                    break;
+                }
             }
         } catch (e) { }
     }
 
-    return { ok: false, reason: "no_context" };
+    if (!locateResult || !targetContext) {
+        return { ok: false, error: locateResult?.error || "editor_not_found", message: locateResult?.message || "未找到输入框" };
+    }
+
+    // Step 2: Focus the editor via CDP mouse click to ensure native input focus
+    if (locateResult.pos && locateResult.pos.x > 0 && locateResult.pos.y > 0) {
+        try {
+            await cdp.call('Input.dispatchMouseEvent', {
+                type: 'mousePressed',
+                x: locateResult.pos.x,
+                y: locateResult.pos.y,
+                button: 'left',
+                clickCount: 1
+            });
+            await cdp.call('Input.dispatchMouseEvent', {
+                type: 'mouseReleased',
+                x: locateResult.pos.x,
+                y: locateResult.pos.y,
+                button: 'left',
+                clickCount: 1
+            });
+        } catch (e) {
+            console.error('CDP mouse click focus error:', e);
+        }
+    }
+
+    // Step 3: Clear any existing text via CDP SelectAll (Ctrl+A) + Backspace
+    try {
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
+    } catch (e) {
+        console.error('CDP clear text error:', e);
+    }
+
+    // Step 4: Insert text via CDP Input.insertText (native platform input handled by Chromium & Lexical)
+    try {
+        await cdp.call('Input.insertText', { text });
+    } catch (e) {
+        console.error('CDP insertText error:', e);
+    }
+
+    // Small delay to allow Lexical / React to update internal state
+    await new Promise(r => setTimeout(r, 100));
+
+    // Step 5: Submit the message!
+    // Priority 1: Check if send button is available and click it
+    const SUBMIT_EXP = `(async () => {
+        const inputContainer = document.getElementById('antigravity.agentSidePanelInputBox') || document;
+        const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
+        if (sendBtn && !sendBtn.disabled) {
+            sendBtn.click();
+            return { ok: true, method: 'click_submit' };
+        }
+        return { ok: false, reason: 'button_not_ready_or_disabled' };
+    })()`;
+
+    try {
+        const submitRes = await cdp.call("Runtime.evaluate", {
+            expression: SUBMIT_EXP,
+            returnByValue: true,
+            awaitPromise: true,
+            contextId: targetContext.id
+        });
+        if (submitRes.result?.value?.ok) {
+            return submitRes.result.value;
+        }
+    } catch (e) { }
+
+    // Priority 2: Dispatch native Enter key via CDP
+    try {
+        await cdp.call('Input.dispatchKeyEvent', {
+            type: 'keyDown',
+            windowsVirtualKeyCode: 13,
+            code: 'Enter',
+            key: 'Enter'
+        });
+        await cdp.call('Input.dispatchKeyEvent', {
+            type: 'keyUp',
+            windowsVirtualKeyCode: 13,
+            code: 'Enter',
+            key: 'Enter'
+        });
+        return { ok: true, method: 'cdp_enter' };
+    } catch (e) {
+        console.error('CDP enter key error:', e);
+    }
+
+    // Priority 3: Fallback to React Fiber handleEnter
+    const FIBER_ENTER_EXP = `(async () => {
+        try {
+            const box = document.getElementById('antigravity.agentSidePanelInputBox');
+            const editor = box ? box.querySelector('[contenteditable="true"]') : null;
+            if (!editor) return { ok: false };
+            const fiberKey = Object.keys(editor).find(k => k.startsWith('__reactFiber'));
+            let curr = editor[fiberKey];
+            while (curr) {
+                if (typeof curr.memoizedProps?.handleEnter === 'function') {
+                    const lex = curr.memoizedProps?.lexicalRef?.current;
+                    if (lex) {
+                        curr.memoizedProps.handleEnter(new KeyboardEvent('keydown', { key: 'Enter' }), lex);
+                        return { ok: true, method: 'fiber_handleEnter' };
+                    }
+                }
+                curr = curr.return;
+            }
+            return { ok: false };
+        } catch(e) {
+            return { ok: false, error: e.message };
+        }
+    })()`;
+
+    try {
+        const fiberRes = await cdp.call("Runtime.evaluate", {
+            expression: FIBER_ENTER_EXP,
+            returnByValue: true,
+            awaitPromise: true,
+            contextId: targetContext.id
+        });
+        if (fiberRes.result?.value?.ok) {
+            return fiberRes.result.value;
+        }
+    } catch (e) { }
+
+    return { ok: true, method: 'attempted' };
 }
 
 // Set functionality mode (Turbo / Default / Request Review / Fast / Planning)
@@ -656,15 +792,15 @@ async function setMode(cdp, mode) {
 // Stop Generation
 async function stopGeneration(cdp) {
     const EXP = `(async () => {
-        // Look for the cancel button
-        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+        // Look for the cancel button inside input box or anywhere with exact cancel tooltip
+        const cancel = document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-tooltip-id="input-send-button-cancel-tooltip"], #antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
         if (cancel && cancel.offsetParent !== null) {
             cancel.click();
-            return { success: true };
+            return { success: true, method: 'click_cancel' };
         }
         
         // Fallback: Look for a square icon in the send button area
-        const stopBtn = document.querySelector('button svg.lucide-square')?.closest('button');
+        const stopBtn = document.querySelector('#antigravity\\\\.agentSidePanelInputBox button svg.lucide-square, #antigravity\\\\.agentSidePanelInputBox div.bg-red-500')?.closest('button');
         if (stopBtn && stopBtn.offsetParent !== null) {
             stopBtn.click();
             return { success: true, method: 'fallback_square' };
@@ -681,9 +817,17 @@ async function stopGeneration(cdp) {
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value) return res.result.value;
+            if (res.result?.value?.success) return res.result.value;
         } catch (e) { }
     }
+
+    // Also dispatch Ctrl+D key event via CDP
+    try {
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 68, code: 'KeyD', key: 'd' });
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 68, code: 'KeyD', key: 'd' });
+        return { success: true, method: 'cdp_ctrl_d' };
+    } catch(e) {}
+
     return { error: 'Context failed' };
 }
 
@@ -1789,11 +1933,10 @@ async function createServer() {
 
         const result = await injectMessage(cdpConnection, message);
 
-        // Always return 200 - the message usually goes through even if CDP reports issues
-        // The client will refresh and see if the message appeared
         res.json({
             success: result.ok !== false,
             method: result.method || 'attempted',
+            message: result.message || (result.ok === false ? (result.reason || '发送失败') : '已发送'),
             details: result
         });
     });

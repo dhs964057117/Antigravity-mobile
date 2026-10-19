@@ -1416,3 +1416,102 @@ html, body {
         max-width: 400px;
     }
 }
+
+/* Toast Notification System */
+.toast-container {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+    max-width: 92vw;
+    width: 440px;
+}
+
+.toast-msg {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: rgba(26, 29, 36, 0.96);
+    color: #f3f4f6;
+    border-radius: var(--radius-md, 12px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    font-size: 13.5px;
+    line-height: 1.4;
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: toast-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.toast-msg.toast-warning {
+    border-color: rgba(245, 158, 11, 0.5);
+    background: rgba(36, 30, 22, 0.96);
+}
+
+.toast-msg.toast-error {
+    border-color: rgba(239, 68, 68, 0.5);
+    background: rgba(38, 24, 24, 0.96);
+}
+
+.toast-msg.toast-success {
+    border-color: rgba(16, 185, 129, 0.5);
+    background: rgba(20, 36, 28, 0.96);
+}
+
+.toast-msg .toast-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.toast-msg.toast-warning .toast-icon { color: #f59e0b; }
+.toast-msg.toast-error .toast-icon { color: #ef4444; }
+.toast-msg.toast-success .toast-icon { color: #10b981; }
+.toast-msg.toast-info .toast-icon { color: #3b82f6; }
+
+.toast-msg .toast-text {
+    flex: 1;
+    word-break: break-word;
+}
+
+.toast-msg .toast-close {
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary, #9ca3af);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.toast-msg .toast-close:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+@keyframes toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(-16px) scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.toast-msg.toast-out {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.95);
+    pointer-events: none;
+}
