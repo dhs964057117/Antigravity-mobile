@@ -1210,8 +1210,12 @@ async function sendMessage() {
     const message = messageInput.value.trim();
     if (!message) return;
 
-    // Preserve original message in case sending fails
     const originalMessage = message;
+
+    // Instantly clear textarea and blur virtual keyboard
+    messageInput.value = '';
+    messageInput.style.height = 'auto';
+    messageInput.blur();
 
     sendBtn.disabled = true;
     sendBtn.style.opacity = '0.5';
@@ -1233,20 +1237,14 @@ async function sendMessage() {
         if (!res.ok || (data && data.success === false)) {
             // Restore input text so the user never loses their drafted message!
             messageInput.value = originalMessage;
+            messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
             
-            const reason = data?.details?.reason || data?.error || '';
-            const msg = data?.message || (reason === 'busy' 
-                ? 'AI 正在生成中，请等待上一轮完成或点击顶部“停止”后再发' 
-                : '消息发送失败，请重试');
-            
-            showToast(msg, reason === 'busy' ? 'warning' : 'error');
+            const msg = data?.message || data?.error || '消息发送失败，请重试';
+            showToast(msg, 'error');
             return;
         }
 
-        // Successfully dispatched! Clear input
-        messageInput.value = '';
-        messageInput.style.height = 'auto';
-        if (!isDesktop()) messageInput.blur();
+        showToast('消息已发送', 'success', 1800);
 
         setTimeout(loadSnapshot, 300);
         setTimeout(loadSnapshot, 800);
@@ -1254,6 +1252,7 @@ async function sendMessage() {
     } catch (e) {
         console.error('Send message error:', e);
         messageInput.value = originalMessage;
+        messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
         showToast('发送失败：网络连接异常，请重试', 'error');
     } finally {
         sendBtn.disabled = false;
@@ -1261,15 +1260,23 @@ async function sendMessage() {
     }
 }
 
-sendBtn.addEventListener('click', sendMessage);
+// Send on click
+sendBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    sendMessage();
+});
 
-// Keyboard handling: Enter sends on desktop; Shift+Enter creates new line; On mobile Enter inserts newline
+// Mobile touch handling: triggers instantly on touch release without waiting for blur
+sendBtn.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    sendMessage();
+});
+
+// Keyboard handling: Enter sends; Shift+Enter creates new line
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
-        if (isDesktop()) {
-            e.preventDefault();
-            sendMessage();
-        }
+        e.preventDefault();
+        sendMessage();
     }
 });
 

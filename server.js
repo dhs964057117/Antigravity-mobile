@@ -531,23 +531,10 @@ async function injectMessage(cdp, text) {
         return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
     }
 
-    // Step 1: Check busy state and locate editor inside Antigravity
-    const CHECK_AND_LOCATE = `(async () => {
-        // 1. Precise busy check: Check ONLY inside the input container for an active cancel/stop button
-        const inputContainer = document.getElementById('antigravity.agentSidePanelInputBox') || 
-                               document.querySelector('.agentSidePanelInputBox') ||
-                               document.querySelector('[data-lexical-editor="true"]')?.closest('div.relative');
-        
-        const cancelBtn = inputContainer ? (
-            inputContainer.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]') ||
-            inputContainer.querySelector('button[aria-label*="Cancel (Ctrl+D)"]')
-        ) : null;
+    console.log(`[SEND] Processing message (chars: ${text.length})...`);
 
-        if (cancelBtn && cancelBtn.offsetParent !== null) {
-            return { ok: false, reason: "busy", message: "AI 正在回答中，请稍候再发" };
-        }
-
-        // 2. Locate editor
+    // Step 1: Locate editor inside Antigravity
+    const LOCATE_EXP = `(async () => {
         const editors = [
             ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]'),
             ...document.querySelectorAll('#antigravity\\\\.agentSidePanelInputBox [contenteditable="true"]'),
@@ -576,26 +563,22 @@ async function injectMessage(cdp, text) {
     for (const ctx of cdp.contexts) {
         try {
             const res = await cdp.call("Runtime.evaluate", {
-                expression: CHECK_AND_LOCATE,
+                expression: LOCATE_EXP,
                 returnByValue: true,
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value) {
-                if (res.result.value.reason === 'busy') {
-                    return res.result.value;
-                }
-                if (res.result.value.ok) {
-                    locateResult = res.result.value;
-                    targetContext = ctx;
-                    break;
-                }
+            if (res.result?.value?.ok) {
+                locateResult = res.result.value;
+                targetContext = ctx;
+                break;
             }
         } catch (e) { }
     }
 
     if (!locateResult || !targetContext) {
-        return { ok: false, error: locateResult?.error || "editor_not_found", message: locateResult?.message || "未找到输入框" };
+        console.error('[SEND] Editor not found in any context');
+        return { ok: false, error: "editor_not_found", message: "未找到桌面端输入框" };
     }
 
     // Step 2: Focus the editor via CDP mouse click to ensure native input focus
@@ -616,7 +599,7 @@ async function injectMessage(cdp, text) {
                 clickCount: 1
             });
         } catch (e) {
-            console.error('CDP mouse click focus error:', e);
+            console.error('[SEND] CDP mouse click focus error:', e);
         }
     }
 
@@ -627,18 +610,19 @@ async function injectMessage(cdp, text) {
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
     } catch (e) {
-        console.error('CDP clear text error:', e);
+        console.error('[SEND] CDP clear text error:', e);
     }
 
     // Step 4: Insert text via CDP Input.insertText (native platform input handled by Chromium & Lexical)
     try {
         await cdp.call('Input.insertText', { text });
+        console.log('[SEND] Text inserted via CDP Input.insertText');
     } catch (e) {
-        console.error('CDP insertText error:', e);
+        console.error('[SEND] CDP insertText error:', e);
     }
 
     // Small delay to allow Lexical / React to update internal state
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 120));
 
     // Step 5: Submit the message!
     // Priority 1: Check if send button is available and click it
@@ -660,11 +644,12 @@ async function injectMessage(cdp, text) {
             contextId: targetContext.id
         });
         if (submitRes.result?.value?.ok) {
+            console.log('[SEND] Submitted via click_submit');
             return submitRes.result.value;
         }
     } catch (e) { }
 
-    // Priority 2: Dispatch native Enter key via CDP
+    // Priority 2: Dispatch native Enter key via CDP (tested and confirmed working with Lexical!)
     try {
         await cdp.call('Input.dispatchKeyEvent', {
             type: 'keyDown',
@@ -678,9 +663,10 @@ async function injectMessage(cdp, text) {
             code: 'Enter',
             key: 'Enter'
         });
+        console.log('[SEND] Submitted via CDP Enter key');
         return { ok: true, method: 'cdp_enter' };
     } catch (e) {
-        console.error('CDP enter key error:', e);
+        console.error('[SEND] CDP enter key error:', e);
     }
 
     // Priority 3: Fallback to React Fiber handleEnter
@@ -715,10 +701,12 @@ async function injectMessage(cdp, text) {
             contextId: targetContext.id
         });
         if (fiberRes.result?.value?.ok) {
+            console.log('[SEND] Submitted via fiber_handleEnter');
             return fiberRes.result.value;
         }
     } catch (e) { }
 
+    console.log('[SEND] Fallback attempted');
     return { ok: true, method: 'attempted' };
 }
 
@@ -1922,16 +1910,20 @@ async function createServer() {
     // Send message
     app.post('/send', async (req, res) => {
         const { message } = req.body;
+        console.log(`[HTTP POST /send] Received message: "${(message || '').slice(0, 60)}"`);
 
         if (!message) {
+            console.warn('[HTTP POST /send] Empty message rejected');
             return res.status(400).json({ error: 'Message required' });
         }
 
         if (!cdpConnection) {
+            console.error('[HTTP POST /send] CDP not connected');
             return res.status(503).json({ error: 'CDP not connected' });
         }
 
         const result = await injectMessage(cdpConnection, message);
+        console.log(`[HTTP POST /send] Result: ok=${result.ok !== false}, method=${result.method}`);
 
         res.json({
             success: result.ok !== false,
