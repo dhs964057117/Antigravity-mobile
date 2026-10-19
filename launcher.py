@@ -20,6 +20,16 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
+# Automatically re-execute within project virtual environment if available
+_venv_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "Scripts", "python.exe")
+if sys.platform != "win32":
+    _venv_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "bin", "python")
+if os.path.exists(_venv_py) and os.path.abspath(sys.executable).lower() != os.path.abspath(_venv_py).lower():
+    try:
+        os.execv(_venv_py, [_venv_py] + sys.argv)
+    except Exception:
+        pass
+
 # -----------------------------------------------------------------------------
 # Dependency Management
 # -----------------------------------------------------------------------------
