@@ -67,12 +67,24 @@ let ws = null;
 let idleTimer = null;
 let currentMode = 'Turbo';
 let currentModel = 'Gemini 3.8 Flash High';
-let chatIsOpen = true;
+let isSending = false;
+let authRedirecting = false;
 let isAgentBusy = false;
 let rawConversations = [];
 let availableModels = [];
 
 const USER_SCROLL_LOCK_DURATION = 3000;
+
+// --- Send Button Visual State (Codex style empty vs has-text) ---
+function updateSendButtonState() {
+    if (!sendBtn) return;
+    const hasText = !!(messageInput && messageInput.value.trim().length > 0);
+    if (hasText) {
+        sendBtn.classList.add('has-text');
+    } else {
+        sendBtn.classList.remove('has-text');
+    }
+}
 
 // --- Steer / Interjection Mode Management ---
 function setSteerMode(isBusy) {
@@ -91,31 +103,59 @@ function setSteerMode(isBusy) {
         sendBtn.classList.remove('steer-mode');
         sendBtn.title = '发送 (Enter)';
         if (sendBtnIcon) {
-            sendBtnIcon.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>`;
+            sendBtnIcon.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
         }
         if (sendBtnLabel) sendBtnLabel.textContent = '';
-        messageInput.placeholder = '输入消息... (Shift+Enter 换行, Enter 发送)';
+        messageInput.placeholder = '给 Antigravity 发送消息... (Shift+Enter 换行)';
         if (inputCard) inputCard.classList.remove('steer-focused');
     }
+    updateSendButtonState();
 }
 
 // --- Auth Utilities ---
 async function fetchWithAuth(url, options = {}) {
-    if (!options.headers) options.headers = {};
-    options.headers['ngrok-skip-browser-warning'] = 'true';
-
+    const { timeoutMs = 15000, signal, ...requestOptions } = options;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, timeoutMs);
+    const headers = new Headers(requestOptions.headers);
+    headers.set('ngrok-skip-browser-warning', 'true');
+    headers.set('Accept', 'application/json');
     try {
-        const res = await fetch(url, options);
-        if (res.status === 401) {
-            console.log('[AUTH] Unauthorized, redirecting to login...');
+        const res = await fetch(url, { ...requestOptions, headers, cache: 'no-store', signal: controller.signal });
+        if (res.status === 401 || (res.redirected && new URL(res.url).pathname === '/login.html')) {
+            authRedirecting = true;
             window.location.href = '/login.html';
-            return new Promise(() => {});
+            throw new Error('登录已过期，请重新登录');
         }
-        return res;
-    } catch (e) {
-        throw e;
+        // Include body transfer in the timeout (mobile connections can stall
+        // after receiving HTTP headers). Consumers still use res.json().
+        const body = await res.text();
+        return new Response([204, 205, 304].includes(res.status) ? null : body, {
+            status: res.status, statusText: res.statusText, headers: res.headers
+        });
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
     }
 }
+
+function readSession(key) {
+    try { return sessionStorage.getItem(key); } catch { return null; }
+}
+function saveSession(key, value) {
+    try {
+        if (value === null) sessionStorage.removeItem(key);
+        else sessionStorage.setItem(key, value);
+    } catch { /* Storage can be unavailable in private browsing. */ }
+}
+let pendingSend = null;
+try { pendingSend = JSON.parse(readSession('ag_pending_send')); } catch { /* Ignore old data. */ }
+if (!pendingSend || typeof pendingSend.message !== 'string' || typeof pendingSend.requestId !== 'string') pendingSend = null;
+const restoredDraft = readSession('ag_message_draft') || pendingSend?.message;
+if (restoredDraft) messageInput.value = restoredDraft;
 
 // --- Global Toast Notification ---
 function showToast(message, type = 'info', duration = 3500) {
@@ -168,7 +208,8 @@ function isDesktop() {
 
 function initSidebarState() {
     if (isDesktop()) {
-        const savedCollapsed = localStorage.getItem('ag_sidebar_collapsed') === 'true';
+        let savedCollapsed = false;
+        try { savedCollapsed = localStorage.getItem('ag_sidebar_collapsed') === 'true'; } catch { /* Use default layout. */ }
         if (savedCollapsed) {
             sidebar.classList.add('collapsed');
         } else {
@@ -186,7 +227,7 @@ function initSidebarState() {
 function toggleSidebar() {
     if (isDesktop()) {
         const isCollapsed = sidebar.classList.toggle('collapsed');
-        localStorage.setItem('ag_sidebar_collapsed', isCollapsed ? 'true' : 'false');
+        try { localStorage.setItem('ag_sidebar_collapsed', isCollapsed ? 'true' : 'false'); } catch { /* Keep this session usable. */ }
     } else {
         const isOpen = sidebar.classList.toggle('open');
         sidebarBackdrop.classList.toggle('show', isOpen);
@@ -211,7 +252,10 @@ window.addEventListener('resize', () => {
 });
 
 // --- App State & Desktop Sync ---
+let appStateLoading = false;
 async function fetchAppState() {
+    if (appStateLoading) return;
+    appStateLoading = true;
     try {
         const res = await fetchWithAuth('/app-state');
         const data = await res.json();
@@ -231,103 +275,125 @@ async function fetchAppState() {
         }
     } catch (e) {
         console.warn('[SYNC] Failed to sync app state:', e.message);
+    } finally {
+        appStateLoading = false;
     }
 }
 const syncAppState = fetchAppState;
 
 // --- WebSocket Connection ---
 let reconnectTimeout = null;
+let reconnectAttempt = 0;
 
-function scheduleReconnect(delay = 2000) {
-    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+function scheduleReconnect() {
+    if (reconnectTimeout || authRedirecting || navigator.onLine === false) return;
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempt++, 5)) + Math.random() * 500;
     reconnectTimeout = setTimeout(() => {
+        reconnectTimeout = null;
         connectWebSocket();
     }, delay);
 }
 
-function connectWebSocket() {
-    if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-    }
-
-    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-        return;
-    }
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+function connectWebSocket(force = false) {
+    if (authRedirecting || navigator.onLine === false) return;
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+    if (!force && ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+    if (ws) { ws.dispose?.(); ws.close(); ws = null; }
+    updateStatus(false);
+    let socket;
     try {
-        ws = new WebSocket(`${protocol}//${window.location.host}`);
-    } catch (err) {
-        console.warn('WebSocket init error:', err);
-        scheduleReconnect(3000);
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(`${protocol}//${window.location.host}`);
+        ws = socket;
+    } catch (error) {
+        scheduleReconnect();
         return;
     }
-
-    ws.onopen = () => {
-        updateStatus(true);
+    let connectTimer;
+    let heartbeat;
+    let pongTimer;
+    let snapshotDebounce;
+    const cleanup = () => {
+        clearTimeout(connectTimer);
+        clearTimeout(pongTimer);
+        clearTimeout(snapshotDebounce);
+        clearInterval(heartbeat);
+    };
+    socket.dispose = cleanup;
+    const reconnect = () => {
+        cleanup();
+        if (ws !== socket) return;
+        ws = null;
+        socket.close();
+        updateStatus(false);
+        scheduleReconnect();
+    };
+    const ping = () => {
+        if (ws !== socket || socket.readyState !== WebSocket.OPEN || pongTimer) return;
+        try {
+            socket.send(JSON.stringify({ type: 'ping' }));
+            pongTimer = setTimeout(reconnect, 10000);
+        } catch { reconnect(); }
+    };
+    connectTimer = setTimeout(reconnect, 10000);
+    socket.onopen = () => {
+        if (ws !== socket) return;
+        clearTimeout(connectTimer);
+        ping();
+        heartbeat = setInterval(ping, 15000);
         loadSnapshot();
         loadSidebarHistory();
         fetchAppState();
     };
-
-    let snapshotDebounce = null;
-    ws.onmessage = (event) => {
+    socket.onmessage = event => {
+        if (ws !== socket) return;
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'error' && data.message === 'Unauthorized') {
+                authRedirecting = true;
+                cleanup();
                 window.location.href = '/login.html';
                 return;
             }
-            if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
-                if (snapshotDebounce) clearTimeout(snapshotDebounce);
-                snapshotDebounce = setTimeout(() => {
-                    loadSnapshot(false);
-                }, 80);
+            if (data.type === 'pong') {
+                clearTimeout(pongTimer);
+                pongTimer = null;
+                reconnectAttempt = 0;
+                updateStatus(true, data.cdpConnected);
             }
-        } catch (e) {}
+            if (data.type === 'snapshot_update' && autoRefreshEnabled && !userIsScrolling) {
+                clearTimeout(snapshotDebounce);
+                snapshotDebounce = setTimeout(() => loadSnapshot(false), 80);
+            }
+        } catch { /* Ignore malformed server messages. */ }
     };
-
-    ws.onclose = () => {
-        updateStatus(false);
-        scheduleReconnect(2000);
-    };
-
-    ws.onerror = () => {
-        updateStatus(false);
-    };
+    socket.onclose = reconnect;
+    socket.onerror = reconnect;
 }
 
-// Auto-reconnect and refresh immediately when mobile screen turns on / tab gains focus
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-            console.log('📱 Phone screen unlocked / tab active, reconnecting...');
-            connectWebSocket();
-        } else if (ws.readyState === WebSocket.OPEN) {
-            // Screen unlocked: refresh snapshot & history to sync changes from desktop
-            loadSnapshot(false);
-            loadSidebarHistory();
-            fetchAppState();
-        }
-    }
+function resumeConnection() {
+    if (document.visibilityState === 'visible') connectWebSocket(true);
+}
+document.addEventListener('visibilitychange', resumeConnection);
+window.addEventListener('pageshow', resumeConnection);
+window.addEventListener('online', () => connectWebSocket(true));
+window.addEventListener('offline', () => {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+    const old = ws;
+    ws = null;
+    old?.dispose?.();
+    old?.close();
+    updateStatus(false);
 });
 
-window.addEventListener('online', () => {
-    console.log('🌐 Network online detected, reconnecting...');
-    connectWebSocket();
-});
-
-function updateStatus(connected) {
-    if (connected) {
-        statusDot.classList.remove('disconnected');
-        statusDot.classList.add('connected');
-        statusText.textContent = '实时在线';
-    } else {
-        statusDot.classList.remove('connected');
-        statusDot.classList.add('disconnected');
-        statusText.textContent = '重连中...';
-    }
+function updateStatus(connected, desktopConnected = true) {
+    const healthy = connected && desktopConnected;
+    statusDot.classList.toggle('connected', healthy);
+    statusDot.classList.toggle('disconnected', !healthy);
+    statusText.textContent = navigator.onLine === false ? '网络离线' :
+        !connected ? '重连中...' : !desktopConnected ? '桌面重连中...' : '实时在线';
 }
 
 // --- DOM Morphing for Flicker-Free Rendering ---
@@ -386,7 +452,11 @@ function morphDOM(oldRoot, newRoot) {
 }
 
 // --- Load and Render Chat Snapshot ---
+let snapshotLoading = false;
+let snapshotReload = false;
 async function loadSnapshot(isManual = false) {
+    if (snapshotLoading) { snapshotReload = true; return; }
+    snapshotLoading = true;
     try {
         if (isManual) {
             const icon = refreshBtn.querySelector('svg');
@@ -400,14 +470,15 @@ async function loadSnapshot(isManual = false) {
         const res = await fetchWithAuth('/snapshot');
         if (!res.ok) {
             if (res.status === 503) {
-                chatIsOpen = false;
-                showEmptyState();
+                const error = await res.json();
+                if (error.error === 'cdp_disconnected') updateStatus(true, false);
+                // A missing snapshot is temporary; preserve the current chat.
+                // Never create a new conversation merely because sync is delayed.
                 return;
             }
             throw new Error('Failed to load snapshot');
         }
 
-        chatIsOpen = true;
         const data = await res.json();
 
         // Scroll state preservation
@@ -435,30 +506,30 @@ async function loadSnapshot(isManual = false) {
         const darkModeOverrides = `/* --- BASE SNAPSHOT CSS --- */
 ${data.css}
 
-/* --- FORCE DARK MODE & HIGH-CONTRAST OVERRIDES --- */
+/* --- FORCE DARK MODE & CODEX OBSIDIAN OVERRIDES --- */
 :root, body, #chatContent, #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
-    --bg-app: #080d16 !important;
-    --text-main: #f8fafc !important;
-    --text-muted: #94a3b8 !important;
-    --border-color: #334155 !important;
-    --background: #080d16 !important;
-    --foreground: #f8fafc !important;
-    --card: #121b30 !important;
-    --card-foreground: #f8fafc !important;
-    --card-border: #1a2640 !important;
-    --secondary: #1a2640 !important;
-    --secondary-foreground: #e2e8f0 !important;
-    --muted: #121b30 !important;
-    --muted-foreground: #94a3b8 !important;
-    --border: rgba(255, 255, 255, 0.12) !important;
-    --primary: #6366f1 !important;
+    --bg-app: #0d0d0d !important;
+    --text-main: #ececec !important;
+    --text-muted: #8e8e8e !important;
+    --border-color: rgba(255, 255, 255, 0.08) !important;
+    --background: #0d0d0d !important;
+    --foreground: #ececec !important;
+    --card: #1e1e1e !important;
+    --card-foreground: #ececec !important;
+    --card-border: rgba(255, 255, 255, 0.08) !important;
+    --secondary: #262626 !important;
+    --secondary-foreground: #ececec !important;
+    --muted: #1e1e1e !important;
+    --muted-foreground: #8e8e8e !important;
+    --border: rgba(255, 255, 255, 0.08) !important;
+    --primary: #10a37f !important;
     --primary-foreground: #ffffff !important;
-    --accent: #6366f1 !important;
+    --accent: #10a37f !important;
     --accent-foreground: #ffffff !important;
-    --popover: #121b30 !important;
-    --popover-foreground: #f8fafc !important;
+    --popover: #1e1e1e !important;
+    --popover-foreground: #ececec !important;
     --max-conversation-width: 100% !important;
-    color: #f8fafc !important;
+    color: #ececec !important;
 }
 
 #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
@@ -467,7 +538,7 @@ ${data.css}
 
 #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
     background-color: transparent !important;
-    color: #f8fafc !important;
+    color: #ececec !important;
     font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
     position: relative !important;
     height: auto !important;
@@ -479,59 +550,90 @@ ${data.css}
 }
 
 #conversation p, #conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation li, #conversation td, #conversation th {
-    color: #f8fafc !important;
+    color: #ececec !important;
     font-size: 15px;
-    line-height: 1.6;
+    line-height: 1.68;
 }
 
-#conversation div[class*="bg-background"], #conversation [class*="md-sticky-message-bleed"] {
-    background: #1a2640 !important;
-    color: #f8fafc !important;
-    border-radius: 12px !important;
-    border: 1px solid rgba(255, 255, 255, 0.12) !important;
-    padding: 12px 16px !important;
-    margin: 12px 0 !important;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+#conversation h1, #conversation h2, #conversation h3 {
+    color: #ffffff !important;
+    font-weight: 600;
+    margin-top: 18px;
+    margin-bottom: 8px;
 }
 
-#conversation [data-testid="worked-for-collapsible"], #conversation button[class*="tabular-nums"], #conversation button:has(svg):has(span) {
-    background: rgba(255, 255, 255, 0.06) !important;
-    border: 1px solid rgba(255, 255, 255, 0.16) !important;
+/* User Message Bubble - Codex Prompt Card */
+#conversation div[class*="group/user-input-step"],
+#conversation div[class*="bg-background"],
+#conversation [class*="md-sticky-message-bleed"] {
+    background: #262626 !important;
+    color: #f5f5f5 !important;
+    border-radius: 18px !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    padding: 12px 18px !important;
+    margin: 14px 0 !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+    max-width: 88% !important;
+    margin-left: auto !important;
+}
+
+#conversation [class*="md-sticky-message-bleed"]::after {
+    display: none !important;
+}
+
+/* Thinking & Reasoning blocks - Codex collapsible thought */
+#conversation [data-testid="worked-for-collapsible"], 
+#conversation button[class*="tabular-nums"], 
+#conversation button:has(svg):has(span) {
+    background: rgba(255, 255, 255, 0.03) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
     border-radius: 8px !important;
-    color: #f8fafc !important;
-    padding: 8px 12px !important;
+    color: #8e8e8e !important;
+    padding: 6px 12px !important;
     margin: 8px 0 !important;
     display: flex !important;
     align-items: center !important;
     gap: 8px !important;
     cursor: pointer !important;
-    font-size: 13px !important;
+    font-size: 12.5px !important;
+    transition: all 0.15s ease !important;
 }
 
+#conversation [data-testid="worked-for-collapsible"]:hover,
+#conversation button[class*="tabular-nums"]:hover,
+#conversation button:has(svg):has(span):hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+    border-color: rgba(255, 255, 255, 0.14) !important;
+    color: #ececec !important;
+}
+
+/* Code Blocks - Codex Signature Code Box */
 pre, code, .monaco-editor-background, [class*="terminal"] {
-    background-color: #0f172a !important;
-    color: #e2e8f0 !important;
-    font-family: 'JetBrains Mono', Consolas, monospace !important;
+    background-color: #141414 !important;
+    color: #e5e5e5 !important;
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
     border-radius: 8px;
-    border: 1px solid #1e293b;
+    border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 pre {
     position: relative !important;
     white-space: pre-wrap !important;
     word-break: break-word !important;
-    padding: 10px 12px !important;
-    margin: 8px 0 !important;
+    padding: 14px 16px !important;
+    margin: 12px 0 !important;
     width: 100% !important;
+    border-radius: 10px !important;
+    line-height: 1.52 !important;
 }
 
 .mobile-copy-btn {
     position: absolute !important;
-    top: 6px !important;
-    right: 6px !important;
-    background: rgba(30, 41, 59, 0.9) !important;
-    color: #94a3b8 !important;
-    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    top: 8px !important;
+    right: 8px !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+    color: #8e8e8e !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
     width: 28px !important;
     height: 28px !important;
     cursor: pointer !important;
@@ -540,6 +642,13 @@ pre {
     justify-content: center !important;
     border-radius: 6px !important;
     z-index: 10 !important;
+    transition: all 0.15s ease !important;
+}
+
+.mobile-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.18) !important;
 }`;
 
         if (styleTag.dataset.rawCss !== data.css) {
@@ -580,6 +689,12 @@ pre {
         }
     } catch (err) {
         console.error('loadSnapshot error:', err);
+    } finally {
+        snapshotLoading = false;
+        if (snapshotReload) {
+            snapshotReload = false;
+            queueMicrotask(() => loadSnapshot());
+        }
     }
 }
 
@@ -672,10 +787,14 @@ function showEmptyState() {
 }
 
 // --- Sidebar Conversation History ---
+let historyLoading = false;
 async function loadSidebarHistory() {
+    if (historyLoading || isSending) return;
+    historyLoading = true;
     try {
         const res = await fetchWithAuth('/chat-history');
         const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'History unavailable');
         rawConversations = data.chats || [];
 
         renderSidebarConversations(rawConversations);
@@ -686,11 +805,14 @@ async function loadSidebarHistory() {
             headerSessionTitle.textContent = activeChat.title;
         }
     } catch (e) {
+        if (rawConversations.length) return;
         sidebarConvoList.innerHTML = `
             <div class="sidebar-state-empty">
                 <span>⚠️ 加载历史失败</span>
             </div>
         `;
+    } finally {
+        historyLoading = false;
     }
 }
 
@@ -890,6 +1012,7 @@ sidebarConvoList.addEventListener('click', async (e) => {
 // --- Select / Switch Conversation ---
 async function selectChat(title) {
     if (!title) return;
+    if (isSending) { showToast('消息正在提交，请稍后切换会话', 'info'); return; }
 
     headerSessionTitle.textContent = title;
     chatContent.innerHTML = `
@@ -925,6 +1048,7 @@ async function selectChat(title) {
 
 // --- Start New Chat ---
 async function startNewChat() {
+    if (isSending) { showToast('消息正在提交，请稍后新建会话', 'info'); return false; }
     sidebarNewChatBtn.style.opacity = '0.5';
     closeMobileSidebar();
 
@@ -1049,245 +1173,160 @@ modelModalOverlay.addEventListener('click', (e) => {
 });
 
 // --- Usage & Quota Viewer Logic ---
+let usageRequestId = 0;
+let usageController = null;
+let usageLoading = false;
+let nextUsageRefresh = 0;
+let quotaClockOffsetMs = 0;
+
 async function openUsageModal() {
-    usageModalBody.innerHTML = `
-        <div class="usage-loading">
-            <div class="loading-spinner"></div>
-            <p>正在计算当前会话 Token 消耗与配额状态...</p>
-        </div>
-    `;
+    usageModalBody.innerHTML = '<div class="usage-loading"><div class="loading-spinner"></div><p>正在读取账户模型组配额...</p></div>';
     usageModalOverlay.classList.add('show');
     fetchUsageData();
 }
 
-async function fetchUsageData() {
+async function fetchUsageData(forceRefresh = false) {
+    const requestId = ++usageRequestId;
+    usageController?.abort();
+    usageController = new AbortController();
+    usageLoading = true;
+    refreshUsageBtn.disabled = true;
     try {
-        const res = await fetchWithAuth('/usage');
+        const res = await fetchWithAuth(forceRefresh ? '/usage?refresh=1' : '/usage', { signal: usageController.signal });
+        if (!res.ok) throw new Error('Usage unavailable');
         const data = await res.json();
+        if (requestId !== usageRequestId || !usageModalOverlay.classList.contains('show')) return;
         renderUsageModal(data);
-    } catch (e) {
-        usageModalBody.innerHTML = `
-            <div style="padding:20px; text-align:center; color:var(--error);">
-                获取用量数据失败，请重试
-            </div>
-        `;
+    } catch (error) {
+        if (requestId !== usageRequestId || !usageModalOverlay.classList.contains('show')) return;
+        usageModalBody.innerHTML = '<div class="quota-notice">获取账户用量失败，请刷新重试。</div>';
+    } finally {
+        if (requestId === usageRequestId) {
+            usageLoading = false;
+            refreshUsageBtn.disabled = false;
+        }
     }
 }
 
+function formatQuotaPercent(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? `${value.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}%` : '未提供';
+}
+
+function formatQuotaTime(value) {
+    if (!value || !Number.isFinite(Date.parse(value))) return '未提供';
+    return new Date(value).toLocaleString('zh-CN', {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short'
+    });
+}
+
+function formatQuotaCountdown(value, now = Date.now() + quotaClockOffsetMs) {
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return '未提供重置时间';
+    const seconds = Math.max(0, Math.ceil((timestamp - now) / 1000));
+    if (!seconds) return '已到重置时间，等待账户更新';
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor(seconds % 86400 / 3600);
+    const minutes = Math.floor(seconds % 3600 / 60);
+    const rest = seconds % 60;
+    return `${days ? `${days}天 ` : ''}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')} 后补充`;
+}
+
+function renderQuotaWindow(bucket, windowType) {
+    const title = { daily: '日限额', weekly: '周限额', five_hour: '5 小时限额' }[windowType] || bucket?.label || '其他额度';
+    if (!bucket) return `<div class="quota-window quota-window-missing"><b>${escapeHtml(title)}</b><span>账户未提供</span></div>`;
+    const exhausted = bucket.remainingPercent === 0 && !bucket.disabled;
+    const known = typeof bucket.usedPercent === 'number' && Number.isFinite(bucket.usedPercent);
+    const percent = known ? Math.max(0, Math.min(100, bucket.usedPercent)) : 0;
+    return `
+        <section class="quota-window ${exhausted ? 'quota-window-exhausted' : ''} ${bucket.disabled ? 'quota-window-disabled' : ''}">
+            <div class="quota-window-heading"><b>${escapeHtml(title)}</b>
+                ${bucket.disabled ? '<span class="quota-state">暂不适用</span>' : exhausted ? '<span class="quota-state quota-state-error">额度已用完</span>' : ''}
+            </div>
+            <div class="quota-window-metrics">
+                <div><span>限额</span><strong>${bucket.disabled ? '暂不适用' : formatQuotaPercent(bucket.limitPercent)}</strong></div>
+                <div><span>已用</span><strong>${bucket.disabled ? '—' : formatQuotaPercent(bucket.usedPercent)}</strong></div>
+                <div><span>剩余</span><strong>${bucket.disabled ? '—' : formatQuotaPercent(bucket.remainingPercent)}</strong></div>
+            </div>
+            ${known && !bucket.disabled ? `<div class="usage-progress-bar" role="progressbar" aria-label="${escapeHtml(title)}已用" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="usage-progress-fill" style="width:${percent}%"></div></div>` : ''}
+            <div class="quota-window-reset"><span>补充 / 重置时间</span><time>${bucket.disabled ? '本周期暂不适用' : escapeHtml(formatQuotaTime(bucket.resetAt))}</time>
+                ${bucket.resetAt && !bucket.disabled ? `<span class="quota-countdown" data-quota-reset-at="${escapeHtml(bucket.resetAt)}">${escapeHtml(formatQuotaCountdown(bucket.resetAt))}</span>` : ''}
+            </div>
+            ${bucket.description ? `<p class="quota-window-description">${escapeHtml(bucket.description)}</p>` : ''}
+        </section>`;
+}
+
+function renderQuotaGroups(quota, model) {
+    if (!quota.available) return `<div class="quota-notice">${escapeHtml(quota.message || '暂未读取到账户配额，请刷新重试。')}</div>`;
+    if (!quota.groups?.length) return '<div class="quota-notice">账户当前没有返回模型组配额。</div>';
+    const modelFamily = (model || '').match(/gemini|claude|gpt/i)?.[0].toLowerCase();
+    return `<div class="quota-groups">${quota.groups.map(group => {
+        const buckets = group.buckets || [];
+        const active = modelFamily && `${group.name} ${group.description}`.toLowerCase().includes(modelFamily);
+        const rows = ['daily', 'weekly', 'five_hour'].map(windowType => {
+            const matches = buckets.filter(bucket => bucket.window === windowType);
+            if (windowType === 'five_hour' && !matches.length) return '';
+            return matches.length ? matches.map(bucket => renderQuotaWindow(bucket, windowType)).join('') : renderQuotaWindow(null, windowType);
+        }).join('') + buckets.filter(bucket => bucket.window === 'other').map(bucket => renderQuotaWindow(bucket, 'other')).join('');
+        return `<article class="quota-group-card"><div class="quota-group-heading"><h4>${escapeHtml(group.name)}</h4>${active ? '<span class="limit-badge primary">当前模型组</span>' : ''}</div>
+            ${group.description ? `<p class="quota-group-description">${escapeHtml(group.description)}</p>` : ''}${rows}</article>`;
+    }).join('')}</div>`;
+}
+
 function renderUsageModal(data) {
+    quotaClockOffsetMs = Number.isFinite(Date.parse(data.serverTime)) ? Date.parse(data.serverTime) - Date.now() : 0;
     const session = data.session || {};
     const system = data.system || {};
     const quota = data.quota || {};
-    const matchedModel = data.matchedModel || {};
-    const models = data.models || [];
-
-    const turns = session.turns || 0;
-    const tokens = (session.approxTokens || 0).toLocaleString();
-    const maxTokens = (session.maxContextTokens || 1000000).toLocaleString();
-    const percent = session.contextUsedPercent || 1;
-    const nodes = session.nodes || 0;
-    const payloadKb = session.payloadKb || 0;
-
-    // Build models table rows
-    const tableRows = models.map(m => {
-        const isCurrent = (data.model && data.model.toLowerCase().includes(m.id)) || 
-                          (m.name && m.name === data.model) ||
-                          (m.id === matchedModel.id);
-        const rowStyle = isCurrent ? 'background:rgba(99, 102, 241, 0.12); font-weight:600;' : '';
-        const currentTag = isCurrent ? ' <span class="limit-badge primary">当前生效</span>' : '';
-        return `
-            <tr style="${rowStyle}">
-                <td>
-                    <b>${escapeHtml(m.displayName || m.name)}</b>${currentTag}
-                    <div style="font-size:10.5px; color:var(--text-muted); margin-top:2px;">${escapeHtml(m.desc || '')}</div>
-                </td>
-                <td><b>${m.contextWindow || '1M'}</b></td>
-                <td>${m.rpm || '标准'} / ${m.tpm || '高'}</td>
-                <td>${m.rpd || '充裕'}</td>
-                <td><span class="limit-badge success">${escapeHtml(m.dailyReset || '08:00 CST')}</span></td>
-            </tr>
-        `;
-    }).join('');
-
+    const tokens = Number(session.approxTokens || 0).toLocaleString();
     usageModalBody.innerHTML = `
-        <!-- Section 1: 配额重置与限速刷新倒计时 -->
-        <div class="usage-section-title">配额重置与速率刷新 (Quota & Recovery)</div>
-        <div class="quota-reset-grid">
-            <div class="quota-card">
-                <div class="quota-card-header">
-                    <span class="quota-card-title">
-                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-                        每日配额总重置 (Daily RPD)
-                    </span>
-                    <span class="quota-card-badge">北京时间 08:00</span>
-                </div>
-                <div class="quota-countdown-val" id="dailyResetCountdownVal">${quota.dailyResetCountdown || '--:--:--'}</div>
-                <div class="quota-card-desc">
-                    ${quota.dailyResetRule || '每日 00:00 UTC (北京时间 08:00) 统一重置 RPD 配额'}
-                </div>
-            </div>
-
-            <div class="quota-card sliding">
-                <div class="quota-card-header">
-                    <span class="quota-card-title">
-                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-                        速率滑动窗口 (RPM / TPM)
-                    </span>
-                    <span class="quota-card-badge">60s 滑动窗口</span>
-                </div>
-                <div class="quota-countdown-val" id="slidingResetCountdownVal">${quota.slidingWindowSeconds || 60}s</div>
-                <div class="quota-card-desc">
-                    ${quota.slidingWindowRule || '突发超限 60 秒平滑恢复，无须等待次日'}
-                </div>
-            </div>
-        </div>
-
-        <!-- Section 2: 当前生效模型规格与速率配额 -->
-        <div class="usage-section-title">当前模型用量规格与速率限制</div>
-        <div class="active-model-card">
-            <div class="active-model-header">
-                <div class="active-model-name">
-                    <span>${escapeHtml(matchedModel.name || data.model || currentModel)}</span>
-                    <span class="limit-badge primary">${escapeHtml(matchedModel.badge || '活跃')}</span>
-                </div>
-                <span class="limit-badge success">${escapeHtml(matchedModel.rateLimit || '标准配额')}</span>
-            </div>
-            <div style="font-size:12px; color:var(--text-secondary); line-height:1.4;">
-                ${escapeHtml(matchedModel.desc || '日常全能型工程助手')}
-            </div>
-            <div class="model-limits-grid" style="margin-top:10px;">
-                <div class="model-limit-item">
-                    <div class="model-limit-val">${matchedModel.contextWindow || '1M'}</div>
-                    <div class="model-limit-lbl">上下文窗口</div>
-                </div>
-                <div class="model-limit-item">
-                    <div class="model-limit-val">${matchedModel.maxOutput || '8,192'}</div>
-                    <div class="model-limit-lbl">单次最大输出</div>
-                </div>
-                <div class="model-limit-item">
-                    <div class="model-limit-val">${matchedModel.rpm || '15 ~ 360'}</div>
-                    <div class="model-limit-lbl">分钟速率 (RPM)</div>
-                </div>
-                <div class="model-limit-item">
-                    <div class="model-limit-val">${matchedModel.rpd || '1,500+'}</div>
-                    <div class="model-limit-lbl">每日限额 (RPD)</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Section 3: 当前会话上下文占用与消耗 -->
-        <div class="usage-section-title">当前会话统计 (Current Session)</div>
+        <div class="usage-section-title">各模型组限额与用量</div>
+        <div class="quota-notice">组内模型共享额度。官方以百分比提供剩余额度，未提供请求数或 Token 总上限；未返回的周期标为“账户未提供”。时间按当前设备时区显示。</div>
+        ${renderQuotaGroups(quota, data.model)}
+        ${quota.available ? `<div class="quota-source">账户数据更新于 ${escapeHtml(formatQuotaTime(quota.capturedAt))}</div>` : ''}
+        ${quota.description ? `<details class="quota-rules"><summary>账户额度规则</summary><p>${escapeHtml(quota.description)}</p></details>` : ''}
+        <div class="usage-section-title">当前会话估算</div>
         <div class="usage-stats-grid">
-            <div class="usage-stat-box">
-                <div class="usage-stat-val">${turns}</div>
-                <div class="usage-stat-lbl">对话轮次 (Turns)</div>
-            </div>
-            <div class="usage-stat-box">
-                <div class="usage-stat-val">~${tokens}</div>
-                <div class="usage-stat-lbl">估算 Tokens</div>
-            </div>
-            <div class="usage-stat-box">
-                <div class="usage-stat-val">${percent}%</div>
-                <div class="usage-stat-lbl">上下文已使用</div>
-            </div>
+            <div class="usage-stat-box"><div class="usage-stat-val">${Number(session.turns || 0)}</div><div class="usage-stat-lbl">估算对话轮次</div></div>
+            <div class="usage-stat-box"><div class="usage-stat-val">~${tokens}</div><div class="usage-stat-lbl">当前页面估算 Tokens</div></div>
+            <div class="usage-stat-box"><div class="usage-stat-val">${Number(session.payloadKb || 0)} KB</div><div class="usage-stat-lbl">页面数据量</div></div>
         </div>
-
-        <div class="usage-progress-card">
-            <div class="usage-progress-header">
-                <span>上下文窗口占用 (${tokens} / ${maxTokens} Tokens)</span>
-                <span><b>${percent}%</b></span>
-            </div>
-            <div class="usage-progress-bar">
-                <div class="usage-progress-fill" style="width: ${percent}%;"></div>
-            </div>
-            <div style="font-size:11px; color:var(--text-dim); margin-top:6px;">
-                当前渲染节点: ${nodes} Nodes · 数据载荷: ${payloadKb} KB
-            </div>
-        </div>
-
-        <!-- Section 4: 各模型配额限制与重置周期对比 -->
-        <div class="usage-section-title">各模型配额限制与重置周期对比</div>
-        <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); overflow-x:auto;">
-            <table class="usage-table">
-                <thead>
-                    <tr>
-                        <th style="min-width:140px;">模型名称</th>
-                        <th>上下文</th>
-                        <th>速率 (RPM/TPM)</th>
-                        <th>每日上限 (RPD)</th>
-                        <th>重置时间</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${tableRows}
-                </tbody>
-            </table>
-        </div>
-
-        <!-- Section 5: 系统通道与连接运行状态 -->
-        <div class="usage-section-title">系统通道与连接运行状态</div>
+        <p class="quota-source">会话估算仅基于当前同步的页面内容，账户配额以模型组数据为准。</p>
+        <div class="usage-section-title">连接状态</div>
         <div class="system-status-pills">
             <div class="sys-pill">当前模型: <b>${escapeHtml(data.model || currentModel)}</b></div>
             <div class="sys-pill">执行模式: <b>${escapeHtml(data.mode || currentMode)}</b></div>
-            <div class="sys-pill">CDP 状态: <b>${system.cdpConnected ? '✅ 已连通' : '❌ 未连接'}</b></div>
-            <div class="sys-pill">服务运行: <b>${system.uptimeFormatted || '刚刚启动'}</b></div>
-            <div class="sys-pill">服务内存: <b>${system.memoryMb || 0} MB</b></div>
-            <div class="sys-pill">端口: <b>${system.port || 3000}</b></div>
-        </div>
-    `;
-
-    // Start live countdown timer for reset
+            <div class="sys-pill">桌面: <b>${system.cdpConnected ? '已连接' : '未连接'}</b></div>
+            <div class="sys-pill">运行: <b>${escapeHtml(system.uptimeFormatted || '刚刚启动')}</b></div>
+        </div>`;
     if (window.usageCountdownTimer) clearInterval(window.usageCountdownTimer);
-
-    let dailySeconds = quota.dailyResetSecondsRemaining || 0;
-    let slidingSeconds = quota.slidingWindowSeconds || 60;
-
-    function updateCountdownDisplay() {
-        const h = Math.floor(dailySeconds / 3600);
-        const m = Math.floor((dailySeconds % 3600) / 60);
-        const s = dailySeconds % 60;
-        const dailyEl = document.getElementById('dailyResetCountdownVal');
-        if (dailyEl) {
-            dailyEl.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-        }
-        const slidingEl = document.getElementById('slidingResetCountdownVal');
-        if (slidingEl) {
-            slidingEl.textContent = `${slidingSeconds}s`;
-        }
-    }
-
-    updateCountdownDisplay();
-
+    nextUsageRefresh = Date.now() + 30000;
     window.usageCountdownTimer = setInterval(() => {
-        if (dailySeconds > 0) dailySeconds--;
-        else dailySeconds = 86400;
-
-        if (slidingSeconds > 1) slidingSeconds--;
-        else slidingSeconds = 60;
-
-        updateCountdownDisplay();
+        usageModalBody.querySelectorAll('[data-quota-reset-at]').forEach(element => {
+            element.textContent = formatQuotaCountdown(element.getAttribute('data-quota-reset-at'));
+        });
+        if (!usageLoading && Date.now() >= nextUsageRefresh && usageModalOverlay.classList.contains('show')) {
+            nextUsageRefresh = Date.now() + 30000;
+            fetchUsageData();
+        }
     }, 1000);
 }
 
 function closeUsageModal() {
-    if (window.usageCountdownTimer) {
-        clearInterval(window.usageCountdownTimer);
-        window.usageCountdownTimer = null;
-    }
+    usageRequestId++;
+    usageController?.abort();
+    usageLoading = false;
+    refreshUsageBtn.disabled = false;
+    if (window.usageCountdownTimer) clearInterval(window.usageCountdownTimer);
+    window.usageCountdownTimer = null;
     usageModalOverlay.classList.remove('show');
 }
 
 usageBtn.addEventListener('click', openUsageModal);
-sidebarUsageBtn.addEventListener('click', () => {
-    closeMobileSidebar();
-    openUsageModal();
-});
+sidebarUsageBtn.addEventListener('click', () => { closeMobileSidebar(); openUsageModal(); });
 closeUsageModalBtn.addEventListener('click', closeUsageModal);
 confirmUsageModalBtn.addEventListener('click', closeUsageModal);
-refreshUsageBtn.addEventListener('click', fetchUsageData);
-usageModalOverlay.addEventListener('click', (e) => {
-    if (e.target === usageModalOverlay) closeUsageModal();
-});
+refreshUsageBtn.addEventListener('click', () => fetchUsageData(true));
+usageModalOverlay.addEventListener('click', event => { if (event.target === usageModalOverlay) closeUsageModal(); });
 
 // --- Mode Switcher Logic ---
 const MODES = ['Turbo', 'Fast', 'Planning', 'Default', 'Request Review'];
@@ -1347,71 +1386,72 @@ modeModalOverlay.addEventListener('click', (e) => {
 
 // --- Sending Messages ---
 async function sendMessage(overrideText = null) {
+    if (isSending) return;
     const rawText = overrideText !== null ? overrideText : messageInput.value;
     const message = rawText ? rawText.trim() : '';
     if (!message) return;
-
-    const originalMessage = message;
-    const isSteerSubmission = isAgentBusy;
-
-    // If using the input textarea, clear it immediately
-    if (overrideText === null) {
-        messageInput.value = '';
-        messageInput.style.height = 'auto';
-        messageInput.blur();
+    if (navigator.onLine === false) { showToast('网络离线，消息草稿已保留', 'error'); return; }
+    const sameRequest = pendingSend?.message === message;
+    if (!sameRequest) {
+        pendingSend = {
+            requestId: window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+            message, isSteer: isAgentBusy
+        };
     }
-
+    saveSession('ag_pending_send', JSON.stringify(pendingSend));
+    if (overrideText === null) saveSession('ag_message_draft', rawText);
+    isSending = true;
     sendBtn.disabled = true;
     sendBtn.style.opacity = '0.5';
-
     try {
-        if (!chatIsOpen) {
-            await startNewChat();
-            await new Promise(r => setTimeout(r, 600));
-        }
-
-        const res = await fetchWithAuth('/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                message: originalMessage,
-                isSteer: isSteerSubmission
-            })
-        });
-
-        const data = await res.json().catch(() => null);
-
-        if (!res.ok || !data || data.success === false || data.ok === false) {
-            if (overrideText === null) {
-                // Restore input text so the user never loses their drafted message!
-                messageInput.value = originalMessage;
-                messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+        let res;
+        // Only a lost response retries, and always with the same receipt ID.
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                res = await fetchWithAuth('/send', {
+                    method: 'POST', timeoutMs: 45000,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(pendingSend)
+                });
+                break;
+            } catch (error) {
+                if (authRedirecting || attempt === 1 || navigator.onLine === false) throw error;
             }
-            
-            const msg = data?.message || data?.error || '消息发送失败，请重试';
-            showToast(msg, 'error');
+        }
+        const data = await res.json();
+        if (!res.ok || data?.success !== true || data?.ok !== true) {
+            if (!data?.uncertain) {
+                pendingSend = null;
+                saveSession('ag_pending_send', null);
+            }
+            if (overrideText !== null && !messageInput.value) {
+                messageInput.value = message;
+                saveSession('ag_message_draft', message);
+            }
+            showToast(data?.message || '消息发送失败，草稿已保留', 'error');
             return;
         }
-
-        if (data.isSteer) {
-            showToast('⚡ 插话已成功介入引导', 'success', 2200);
-        } else {
-            showToast('消息已发送', 'success', 1800);
+        pendingSend = null;
+        saveSession('ag_pending_send', null);
+        // Keep any edits typed while this request was in progress.
+        if (overrideText === null && messageInput.value === rawText) {
+            messageInput.value = '';
+            messageInput.style.height = 'auto';
+            saveSession('ag_message_draft', null);
+            updateSendButtonState();
         }
-
+        showToast(data.isSteer ? '⚡ 插话已提交' : '消息已发送', 'success', 1800);
         setTimeout(loadSnapshot, 300);
-        setTimeout(loadSnapshot, 800);
         setTimeout(loadSidebarHistory, 1500);
-    } catch (e) {
-        console.error('Send message error:', e);
-        if (overrideText === null) {
-            messageInput.value = originalMessage;
-            messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
-        }
-        showToast('发送失败：网络连接异常，请重试', 'error');
+    } catch (error) {
+        console.error('Send message error:', error);
+        if (overrideText !== null && !messageInput.value) messageInput.value = message;
+        showToast(authRedirecting ? '登录已过期，草稿已保留' : '未收到发送结果，草稿已保留；重试会核对原请求', 'error');
     } finally {
+        isSending = false;
         sendBtn.disabled = false;
         sendBtn.style.opacity = '1';
+        updateSendButtonState();
     }
 }
 
@@ -1436,10 +1476,12 @@ messageInput.addEventListener('keydown', (e) => {
     }
 });
 
-// Auto-grow textarea
+// Auto-grow textarea and update Codex send button state
 messageInput.addEventListener('input', function () {
+    saveSession('ag_message_draft', this.value);
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 180) + 'px';
+    updateSendButtonState();
 });
 
 // Global Keyboard Shortcuts
@@ -1631,7 +1673,7 @@ function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
     div.textContent = text;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // --- Support Modal ---
