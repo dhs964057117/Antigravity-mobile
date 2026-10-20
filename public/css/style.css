@@ -153,15 +153,21 @@ html, body {
     background: transparent;
     border: 1px solid rgba(255, 255, 255, 0.12);
     color: var(--text-main);
-    padding: 9px 12px;
+    padding: 8px 12px;
     border-radius: var(--radius-md);
     font-size: 13.5px;
     font-weight: 500;
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
     cursor: pointer;
     transition: all var(--transition-fast);
+}
+
+.new-chat-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .sidebar-new-chat-btn:hover {
@@ -514,24 +520,34 @@ html, body {
 .header-left {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.header-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
     min-width: 0;
+    padding: 0 12px;
 }
 
 .session-info {
     display: flex;
     flex-direction: column;
+    align-items: center;
     min-width: 0;
 }
 
 .session-title {
-    font-size: 14.5px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 500;
     color: var(--text-main);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 260px;
+    max-width: 280px;
+    text-align: center;
 }
 
 .session-meta {
@@ -1082,6 +1098,160 @@ html, body {
 
 .send-btn.steer-mode .send-btn-label {
     display: inline;
+}
+
+/* Codex Disclaimer Footnote */
+.composer-disclaimer {
+    text-align: center;
+    font-size: 11px;
+    color: #737373;
+    padding-top: 5px;
+    user-select: none;
+    letter-spacing: 0.2px;
+}
+
+/* OpenAI Codex Welcome Screen (Empty State) */
+.codex-welcome-view {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100vh - 270px);
+    padding: 30px 16px 20px;
+    text-align: center;
+    user-select: none;
+    animation: fadeIn 0.3s ease;
+}
+
+.codex-welcome-avatar {
+    width: 44px;
+    height: 44px;
+    background: #1e1e1e;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    margin-bottom: 18px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.codex-welcome-title {
+    font-size: 22px;
+    font-weight: 600;
+    color: #ffffff;
+    margin-bottom: 26px;
+    letter-spacing: -0.02em;
+}
+
+.codex-suggestions-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    max-width: 680px;
+    width: 100%;
+}
+
+.codex-suggestion-card {
+    background: #1e1e1e;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 14px 16px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.codex-suggestion-card:hover {
+    background: #262626;
+    border-color: rgba(255, 255, 255, 0.16);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.codex-suggestion-card .suggestion-icon {
+    font-size: 18px;
+    line-height: 1;
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
+.codex-suggestion-card .suggestion-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.codex-suggestion-card .suggestion-text strong {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #ececec;
+}
+
+.codex-suggestion-card .suggestion-text span {
+    font-size: 12px;
+    color: #8e8e8e;
+    line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+    .codex-suggestions-grid {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+    .codex-welcome-title {
+        font-size: 19px;
+        margin-bottom: 20px;
+    }
+}
+
+/* Codex Code Header Bar */
+.codex-code-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    height: 36px !important;
+    background: #1e1e1e !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    padding: 0 14px !important;
+    user-select: none !important;
+}
+
+.codex-code-lang {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: #b4b4b4 !important;
+    font-family: 'JetBrains Mono', Consolas, monospace !important;
+    text-transform: lowercase !important;
+    letter-spacing: 0.3px !important;
+}
+
+.codex-copy-btn {
+    background: transparent !important;
+    border: none !important;
+    color: #b4b4b4 !important;
+    font-size: 12px !important;
+    font-family: 'Inter', system-ui, sans-serif !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 4px 8px !important;
+    border-radius: 6px !important;
+    transition: all 0.15s ease !important;
+}
+
+.codex-copy-btn:hover {
+    color: #ffffff !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.codex-copy-btn.copied {
+    color: #10b981 !important;
 }
 
 /* ============================================================
@@ -1757,12 +1927,25 @@ html, body {
         display: none;
     }
 
+    .header-center .session-meta {
+        display: none;
+    }
+
     .session-title {
         max-width: 130px;
+        font-size: 13px;
     }
 
     .model-pill span {
-        max-width: 80px;
+        max-width: 90px;
+    }
+
+    .usage-pill .usage-text {
+        display: none;
+    }
+
+    .stop-btn span {
+        display: none;
     }
 
     .usage-stats-grid {

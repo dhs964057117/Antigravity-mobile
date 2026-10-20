@@ -609,46 +609,70 @@ ${data.css}
 
 /* Code Blocks - Codex Signature Code Box */
 pre, code, .monaco-editor-background, [class*="terminal"] {
-    background-color: #141414 !important;
+    background-color: #0f0f0f !important;
     color: #e5e5e5 !important;
     font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
     border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: none;
 }
 
 pre {
     position: relative !important;
     white-space: pre-wrap !important;
     word-break: break-word !important;
-    padding: 14px 16px !important;
-    margin: 12px 0 !important;
+    padding: 0 !important;
+    margin: 16px 0 !important;
     width: 100% !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
     border-radius: 10px !important;
-    line-height: 1.52 !important;
+    line-height: 1.55 !important;
+    overflow: hidden !important;
 }
 
-.mobile-copy-btn {
-    position: absolute !important;
-    top: 8px !important;
-    right: 8px !important;
-    background: rgba(255, 255, 255, 0.06) !important;
-    color: #8e8e8e !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    width: 28px !important;
-    height: 28px !important;
+pre > code, pre:not(:has(> code)) {
+    display: block !important;
+    padding: 12px 16px 14px !important;
+    overflow-x: auto !important;
+}
+
+.codex-code-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    height: 36px !important;
+    background: #1e1e1e !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    padding: 0 14px !important;
+    user-select: none !important;
+}
+
+.codex-code-lang {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: #b4b4b4 !important;
+    font-family: 'JetBrains Mono', Consolas, monospace !important;
+    text-transform: lowercase !important;
+    letter-spacing: 0.3px !important;
+}
+
+.codex-copy-btn {
+    background: transparent !important;
+    border: none !important;
+    color: #b4b4b4 !important;
+    font-size: 12px !important;
+    font-family: 'Inter', system-ui, sans-serif !important;
     cursor: pointer !important;
     display: flex !important;
     align-items: center !important;
-    justify-content: center !important;
+    gap: 6px !important;
+    padding: 4px 8px !important;
     border-radius: 6px !important;
-    z-index: 10 !important;
     transition: all 0.15s ease !important;
 }
 
-.mobile-copy-btn:hover {
-    background: rgba(255, 255, 255, 0.12) !important;
+.codex-copy-btn:hover {
     color: #ffffff !important;
-    border-color: rgba(255, 255, 255, 0.18) !important;
+    background: rgba(255, 255, 255, 0.08) !important;
 }`;
 
         if (styleTag.dataset.rawCss !== data.css) {
@@ -660,7 +684,12 @@ pre {
             chatContent.querySelector('.empty-state') ||
             chatContent.querySelector('.loading-state');
 
-        if (wasEmpty) {
+        const isSnapshotEmpty = !data.html || !data.html.trim() ||
+            (data.html.length < 500 && !data.html.includes('user-input-step') && !data.html.includes('md-sticky-message-bleed'));
+
+        if (isSnapshotEmpty) {
+            renderCodexWelcomeScreen();
+        } else if (wasEmpty) {
             chatContent.innerHTML = data.html;
         } else {
             const temp = document.createElement('div');
@@ -668,7 +697,7 @@ pre {
             morphDOM(chatContent, temp);
         }
 
-        addMobileCopyButtons();
+        addCodexCodeHeaders();
 
         // Update steer mode from snapshot stats or flags
         if (typeof data.isBusy === 'boolean' || (data.stats && typeof data.stats.isBusy === 'boolean')) {
@@ -698,48 +727,124 @@ pre {
     }
 }
 
-// --- Code Copy Buttons ---
-function addMobileCopyButtons() {
+// --- OpenAI Codex Welcome Screen (Empty State) ---
+function renderCodexWelcomeScreen() {
+    chatContent.innerHTML = `
+        <div class="codex-welcome-view">
+            <div class="codex-welcome-avatar">
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                    <polyline points="2 17 12 22 22 17" />
+                    <polyline points="2 12 12 17 22 12" />
+                </svg>
+            </div>
+            <h2 class="codex-welcome-title">今天有什么我可以帮你的？</h2>
+            <div class="codex-suggestions-grid">
+                <button class="codex-suggestion-card" data-prompt="请继续推进当前会话任务，完成未竟的编码与自测">
+                    <div class="suggestion-icon">🚀</div>
+                    <div class="suggestion-text">
+                        <strong>继续推进任务</strong>
+                        <span>一键执行未完成的代码并自动自测</span>
+                    </div>
+                </button>
+                <button class="codex-suggestion-card" data-prompt="请详细解释当前代码架构的设计模式与实现细节">
+                    <div class="suggestion-icon">💡</div>
+                    <div class="suggestion-text">
+                        <strong>剖析架构原理</strong>
+                        <span>解释核心模块实现细节与设计决策</span>
+                    </div>
+                </button>
+                <button class="codex-suggestion-card" data-prompt="请全面检查代码中的潜在边界漏洞、异常处理与健壮性">
+                    <div class="suggestion-icon">🛠️</div>
+                    <div class="suggestion-text">
+                        <strong>代码审查与加固</strong>
+                        <span>排查潜在边界异常与性能瓶颈</span>
+                    </div>
+                </button>
+                <button class="codex-suggestion-card" data-prompt="请总结当前工程的已变更文件、核心进展与下一步行动项">
+                    <div class="suggestion-icon">📋</div>
+                    <div class="suggestion-text">
+                        <strong>生成进展报告</strong>
+                        <span>梳理已变更文件与后续待办建议</span>
+                    </div>
+                </button>
+            </div>
+        </div>
+    `;
+
+    chatContent.querySelectorAll('.codex-suggestion-card').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const prompt = btn.getAttribute('data-prompt');
+            if (prompt) sendMessage(prompt);
+        });
+    });
+}
+
+// --- OpenAI Codex Code Block Headers & Copy Buttons ---
+function addCodexCodeHeaders() {
     const codeBlocks = chatContent.querySelectorAll('pre');
-    codeBlocks.forEach((pre, index) => {
-        if (pre.querySelector('.mobile-copy-btn')) return;
+    codeBlocks.forEach((pre) => {
+        if (pre.querySelector('.codex-code-bar')) return;
 
         const codeElement = pre.querySelector('code') || pre;
         const textToCopy = (codeElement.textContent || codeElement.innerText).trim();
         if (!/\n/.test(textToCopy)) return;
 
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'mobile-copy-btn';
-        copyBtn.setAttribute('aria-label', '复制代码');
-        copyBtn.innerHTML = `
-            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+        // Detect language
+        let lang = 'code';
+        const classes = (codeElement.className || '') + ' ' + (pre.className || '');
+        const match = classes.match(/(?:language-|lang-)([a-zA-Z0-9_-]+)/);
+        if (match && match[1]) {
+            lang = match[1].toLowerCase();
+        } else {
+            if (/^\s*(import|from|def |class |print\(|if __name__)/m.test(textToCopy)) lang = 'python';
+            else if (/^\s*(const |let |var |function|import .* from|console\.log)/m.test(textToCopy)) lang = 'javascript';
+            else if (/^\s*(<html|<!DOCTYPE|<div|<script|<template)/im.test(textToCopy)) lang = 'html';
+            else if (/^\s*(curl|git |npm |pnpm |yarn |pip |python |bash|cd |ls |mkdir)/m.test(textToCopy)) lang = 'bash';
+            else if (/^\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*$/m.test(textToCopy)) lang = 'json';
+            else if (/@import|{\s*margin|{\s*padding|\.[\w-]+\s*\{/m.test(textToCopy)) lang = 'css';
+        }
+
+        const bar = document.createElement('div');
+        bar.className = 'codex-code-bar';
+        bar.innerHTML = `
+            <span class="codex-code-lang">${escapeHtml(lang)}</span>
+            <button class="codex-copy-btn" aria-label="复制代码" title="复制代码">
+                <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <span class="copy-label">复制代码</span>
+            </button>
         `;
 
+        const copyBtn = bar.querySelector('.codex-copy-btn');
         copyBtn.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
             const ok = await copyToClipboard(textToCopy);
             if (ok) {
+                copyBtn.classList.add('copied');
                 copyBtn.innerHTML = `
-                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="#10b981" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                    <svg viewBox="0 0 24 24" width="13" height="13" stroke="#10b981" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="20 6 9 17 4 12"></polyline>
                     </svg>
+                    <span class="copy-label" style="color:#10b981;">已复制!</span>
                 `;
                 setTimeout(() => {
+                    copyBtn.classList.remove('copied');
                     copyBtn.innerHTML = `
-                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                         </svg>
+                        <span class="copy-label">复制代码</span>
                     `;
                 }, 2000);
             }
         });
 
-        pre.appendChild(copyBtn);
+        pre.insertBefore(bar, pre.firstChild);
     });
 }
 
