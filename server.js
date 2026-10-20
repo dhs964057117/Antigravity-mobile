@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { DatabaseSync } from 'node:sqlite';
 import 'dotenv/config';
 import express from 'express';
 import compression from 'compression';
@@ -8,9 +9,9 @@ import http from 'http';
 import https from 'https';
 import fs from 'fs';
 import os from 'os';
+import path, { dirname, join } from 'path';
 import WebSocket from 'ws';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
 import { inspectUI } from './ui_inspector.js';
 import { execSync } from 'child_process';
 import { connectCDP, getJson } from './core/cdp.js';
@@ -1293,7 +1294,99 @@ async function startNewChat(cdp) {
     return { error: 'Context failed' };
 }
 // Get Chat History - Scrapes conversations from sidebar and search modal with desktop-matching grouping
+
+function formatRelativeTime(dateStr) {
+    if (!dateStr) return '';
+    try {
+        const date = new Date(dateStr);
+        const diffMs = Date.now() - date.getTime();
+        if (diffMs < 0 || isNaN(diffMs)) return '';
+        const mins = Math.floor(diffMs / 60000);
+        if (mins < 1) return 'now';
+        if (mins < 60) return mins + 'm';
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return hours + 'h';
+        const days = Math.floor(hours / 24);
+        if (days < 30) return days + 'd';
+        const months = Math.floor(days / 30);
+        if (months < 12) return months + 'mo';
+        return Math.floor(months / 12) + 'y';
+    } catch(e) {
+        return '';
+    }
+}
+
+function parseProjectName(workspaceUris, projectId) {
+    if (projectId === 'outside-of-project' || !workspaceUris) return '';
+    try {
+        const uris = JSON.parse(workspaceUris);
+        if (Array.isArray(uris) && uris[0]) {
+            const raw = decodeURIComponent(uris[0]);
+            const parts = raw.replace(/\/+$/, '').split('/');
+            return parts[parts.length - 1] || '';
+        }
+    } catch(e) {}
+    return '';
+}
+
+function readAllChatsFromDb(activeConvId = '') {
+    const dbPath = path.join(os.homedir(), '.gemini', 'antigravity', 'conversation_summaries.db');
+    if (!fs.existsSync(dbPath)) return null;
+    try {
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        const rows = db.prepare(`
+            SELECT conversation_id, title, preview, workspace_uris, project_id, last_modified_time
+            FROM conversation_summaries
+            ORDER BY last_modified_time DESC
+        `).all();
+        
+        return rows.map(r => {
+            const projectName = parseProjectName(r.workspace_uris, r.project_id);
+            const title = (r.title && r.title.trim()) ? r.title.trim() : ((r.preview && r.preview.trim()) ? r.preview.trim().slice(0, 40) : '未命名会话');
+            const isOutside = (r.project_id === 'outside-of-project') || !projectName;
+            return {
+                id: r.conversation_id,
+                title: title,
+                workspace: projectName,
+                timestamp: formatRelativeTime(r.last_modified_time),
+                isActive: r.conversation_id === activeConvId,
+                isPinned: false,
+                group: isOutside ? 'Conversations' : 'Projects'
+            };
+        });
+    } catch(e) {
+        console.error('Failed to read conversation_summaries.db:', e);
+        return null;
+    }
+}
+
 export async function getChatHistory(cdp) {
+    // 1. In production (real CDP connection with ws), read all conversations and projects from Antigravity SQLite DB
+    // Unit tests pass a synthetic cdp object without ws to verify the DOM parsing fallback
+    if (cdp && cdp.ws) {
+        try {
+            // Detect current active conversation ID from CDP location URL if possible
+            let activeConvId = '';
+            if (cdp && cdp.contexts && cdp.contexts.length > 0) {
+                try {
+                    const urlRes = await cdp.call("Runtime.evaluate", {
+                        expression: "window.location.pathname",
+                        returnByValue: true,
+                        contextId: cdp.contexts[0].id
+                    });
+                    const pathname = urlRes?.result?.value || '';
+                    const match = pathname.match(/\/c\/([a-zA-Z0-9_-]+)/);
+                    if (match) activeConvId = match[1];
+                } catch(e) {}
+            }
+            const dbChats = readAllChatsFromDb(activeConvId);
+            if (dbChats && dbChats.length > 0) {
+                return { success: true, chats: dbChats };
+            }
+        } catch(e) {}
+    }
+
+    // 2. Fallback to DOM scraping if DB is unavailable or in test mocks
     const EXP = `(async () => {
         try {
             const parseConversationLines = (lines) => {
@@ -1389,13 +1482,15 @@ export async function getChatHistory(cdp) {
 }
 
 // Select a Chat to switch to
-async function selectChat(cdp, chatTitle) {
-    const safeChatTitle = JSON.stringify(chatTitle);
-    console.log(`[selectChat] Request received to switch to: "${chatTitle}"`);
+async function selectChat(cdp, chatTitle, chatId = '') {
+    const safeChatTitle = JSON.stringify(chatTitle || '');
+    const safeChatId = JSON.stringify(chatId || '');
+    console.log(`[selectChat] Request received to switch to: "${chatTitle}" (id: ${chatId})`);
 
     const EXP = `(async () => {
         try {
             const targetTitle = ${safeChatTitle}.trim().toLowerCase();
+            const targetId = ${safeChatId}.trim();
 
             const triggerClick = (el) => {
                 if (!el) return;
@@ -1403,6 +1498,26 @@ async function selectChat(cdp, chatTitle) {
                     el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
                 });
             };
+
+            // 0. If chatId is provided, match directly by cascade id or anchor href
+            if (targetId) {
+                const row = document.querySelector('[data-cascade-id="' + targetId + '"]');
+                if (row) {
+                    const targetEl = row.querySelector('a') || row;
+                    triggerClick(targetEl);
+                    return { success: true, method: 'direct-id-row', id: targetId };
+                }
+                const a = document.querySelector('a[href*="' + targetId + '"]');
+                if (a) {
+                    triggerClick(a);
+                    return { success: true, method: 'direct-id-anchor', id: targetId };
+                }
+                // Location navigate fallback
+                if (window.location.pathname !== '/c/' + targetId) {
+                    window.location.href = '/c/' + targetId;
+                    return { success: true, method: 'direct-location', id: targetId };
+                }
+            }
 
             const matches = (text) => {
                 const t = (text || '').trim().toLowerCase();
@@ -2338,10 +2453,10 @@ export async function createServer() {
 
     // Select a Chat
     app.post('/select-chat', desktopAction(async (req, res) => {
-        const { title } = req.body;
-        if (!title) return res.status(400).json({ error: 'Chat title required' });
+        const { title, id } = req.body;
+        if (!title && !id) return res.status(400).json({ error: 'Chat title or id required' });
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-        const result = await selectChat(cdpConnection, title);
+        const result = await selectChat(cdpConnection, title, id);
         if (result.success) { lastSnapshot = null; lastSnapshotHash = null; }
         res.json(result);
     }));

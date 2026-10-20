@@ -110,11 +110,7 @@ function generateSnapshotStyles(rawCss) {
 ${rawCss || ''}
 
 /* --- THEME CSS VARIABLES & CODEX OVERRIDES --- */
-:root, body, #chatContent, #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
-    --bg-app: var(--bg-app) !important;
-    --text-main: var(--text-main) !important;
-    --text-muted: var(--text-muted) !important;
-    --border-color: var(--border) !important;
+#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
     --background: var(--bg-app) !important;
     --foreground: var(--text-main) !important;
     --card: var(--bg-card) !important;
@@ -133,15 +129,7 @@ ${rawCss || ''}
     --popover-foreground: var(--text-main) !important;
     --max-conversation-width: 100% !important;
     color: var(--text-main) !important;
-}
-
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
-    container-type: normal !important;
-}
-
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
     background-color: transparent !important;
-    color: var(--text-main) !important;
     font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
     position: relative !important;
     height: auto !important;
@@ -150,6 +138,10 @@ ${rawCss || ''}
     overflow: visible !important;
     display: block !important;
     padding-right: 0px !important;
+}
+
+#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
+    container-type: normal !important;
 }
 
 #conversation p, #conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation li, #conversation td, #conversation th {
@@ -165,7 +157,32 @@ ${rawCss || ''}
     margin-bottom: 8px;
 }
 
-/* Deep Theme Support for Antigravity Snapshot */
+/* Explicit Dark Theme Rules for Antigravity Snapshot */
+[data-theme="dark"] #conversation,
+[data-theme="dark"] .antigravity-snapshot-root {
+    color-scheme: dark !important;
+    color: #ececec !important;
+    background-color: transparent !important;
+}
+[data-theme="dark"] #conversation p,
+[data-theme="dark"] #conversation h1,
+[data-theme="dark"] #conversation h2,
+[data-theme="dark"] #conversation h3,
+[data-theme="dark"] #conversation h4,
+[data-theme="dark"] #conversation li,
+[data-theme="dark"] #conversation td,
+[data-theme="dark"] #conversation th {
+    color: #ececec !important;
+}
+[data-theme="dark"] #conversation .bg-background {
+    background-color: transparent !important;
+}
+[data-theme="dark"] #conversation .text-muted-foreground,
+[data-theme="dark"] #conversation [class*="text-muted"] {
+    color: #8e8e8e !important;
+}
+
+/* Explicit Light Theme Rules for Antigravity Snapshot */
 [data-theme="light"] #conversation,
 [data-theme="light"] .antigravity-snapshot-root {
     color-scheme: light !important;
@@ -180,12 +197,11 @@ ${rawCss || ''}
     --secondary-foreground: #111827 !important;
     --border: rgba(0, 0, 0, 0.09) !important;
     color: #111827 !important;
-    background-color: #ffffff !important;
+    background-color: transparent !important;
 }
 
 [data-theme="light"] #conversation p,
-[data-theme="light"] #conversation span,
-[data-theme="light"] #conversation div,
+[data-theme="light"] #conversation span:not([class*="badge"]):not([class*="bg-"]),
 [data-theme="light"] #conversation h1,
 [data-theme="light"] #conversation h2,
 [data-theme="light"] #conversation h3,
@@ -1271,8 +1287,9 @@ function renderSidebarConversations(chats) {
     const renderCard = (chat) => {
         const safeTitle = escapeHtml(chat.title);
         const safeWorkspace = escapeHtml(chat.workspace || '');
+        const safeId = escapeHtml(chat.id || '');
         return `
-            <div class="sidebar-card ${chat.isActive ? 'active' : ''}" data-title="${safeTitle}" data-workspace="${safeWorkspace}">
+            <div class="sidebar-card ${chat.isActive ? 'active' : ''}" data-title="${safeTitle}" data-workspace="${safeWorkspace}" data-id="${safeId}">
                 <div class="sidebar-card-icon">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -1430,22 +1447,23 @@ sidebarConvoList.addEventListener('click', async (e) => {
     const card = e.target.closest('.sidebar-card');
     if (card) {
         const title = card.getAttribute('data-title');
+        const id = card.getAttribute('data-id') || '';
         closeMobileSidebar();
-        selectChat(title);
+        selectChat(title, id);
     }
 });
 
 // --- Select / Switch Conversation ---
-async function selectChat(title) {
-    if (!title) return;
+async function selectChat(title, id = '') {
+    if (!title && !id) return;
     if (isSending) { showToast('消息正在提交，请稍后切换会话', 'info'); return; }
 
-    headerSessionTitle.textContent = title;
+    headerSessionTitle.textContent = title || '切换会话';
     chatContent.innerHTML = `
         <div class="loading-state">
             <div class="loading-spinner"></div>
             <p style="font-size:15px; font-weight:600; color:var(--text-main);">正在切换会话...</p>
-            <p style="font-size:12px; color:var(--text-muted); margin-top:4px;">${escapeHtml(title)}</p>
+            <p style="font-size:12px; color:var(--text-muted); margin-top:4px;">${escapeHtml(title || id)}</p>
         </div>
     `;
 
@@ -1453,7 +1471,7 @@ async function selectChat(title) {
         const res = await fetchWithAuth('/select-chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title })
+            body: JSON.stringify({ title, id })
         });
         const data = await res.json();
 
