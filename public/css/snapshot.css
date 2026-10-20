@@ -1,0 +1,241 @@
+/* Keep desktop snapshot tokens separate from the host application's theme. */
+#chatContent {
+    --ag-bg: var(--bg-app); --ag-panel: var(--bg-panel); --ag-card: var(--bg-card);
+    --ag-hover: var(--bg-card-hover); --ag-text: var(--text-main); --ag-muted: var(--text-secondary);
+    --ag-border: var(--border); --ag-border-active: var(--border-active); --ag-accent: var(--accent);
+    --ag-user-bg: var(--bg-user-bubble); --ag-user-text: var(--text-user-bubble);
+    --ag-code-bg: var(--bg-code); --ag-code-header: var(--bg-code-header); --ag-code-text: var(--text-code);
+    --ag-code-border: var(--border-code); --ag-thought-bg: var(--bg-thought);
+    --ag-thought-border: var(--border-thought); --ag-thought-text: var(--text-thought);
+    --ag-keyword: #d8b4fe; --ag-string: #86d3af; --ag-number: #e9bd79; --ag-comment: #9aa4b2;
+    --ag-review-bg: #151719; --ag-review-hover: #1d2023; --ag-review-border: #2b2e32;
+    --ag-review-button: #24282d; --ag-insert: #80cba5; --ag-delete: #eb9999;
+}
+[data-theme="light"] #chatContent {
+    --ag-keyword: #7c3c9e; --ag-string: #216749; --ag-number: #925b10; --ag-comment: #687382;
+    --ag-review-bg: #fafbfc; --ag-review-hover: #f1f3f5; --ag-review-border: #e0e4e8;
+    --ag-review-button: #fff; --ag-insert: #26704c; --ag-delete: #ab414b;
+}
+#chatContent #conversation {
+    --background: var(--ag-bg); --foreground: var(--ag-text);
+    --card: var(--ag-card); --card-foreground: var(--ag-text); --card-border: var(--ag-border);
+    --secondary: var(--ag-card); --secondary-foreground: var(--ag-text);
+    --muted: var(--ag-panel); --muted-foreground: var(--ag-muted);
+    --popover: var(--ag-card); --popover-foreground: var(--ag-text);
+    --border: var(--ag-border); --primary: var(--ag-accent); --primary-foreground: #fff;
+    --accent: var(--ag-hover); --accent-foreground: var(--ag-text);
+    --tw-prose-body: var(--ag-text); --tw-prose-headings: var(--ag-text);
+    --tw-prose-bold: var(--ag-text); --tw-prose-links: var(--ag-accent);
+    --tw-prose-code: var(--ag-code-text); --tw-prose-quotes: var(--ag-muted);
+    --max-conversation-width: 100%;
+    color: var(--ag-text) !important; background: transparent !important;
+    font: 15px/1.8 'Inter', system-ui, -apple-system, sans-serif !important;
+    width: 100% !important; max-width: 100% !important; min-height: 100% !important;
+    height: auto !important; overflow: visible !important; position: relative !important;
+    display: block !important; padding-right: 0 !important; container-type: normal !important;
+    overflow-wrap: anywhere;
+}
+[data-theme="dark"] #chatContent #conversation { color-scheme: dark; }
+[data-theme="light"] #chatContent #conversation { color-scheme: light; }
+/* Imported inline colours and text-fill must not turn light-theme text black in dark mode. */
+#chatContent #conversation * {
+    color: inherit !important; -webkit-text-fill-color: currentColor !important;
+    container-type: normal !important;
+}
+#chatContent #conversation :is(.prose, .markdown, [class*="markdown"], [data-message]) {
+    color: var(--ag-text) !important; background: transparent !important; max-width: 100% !important;
+}
+#chatContent #conversation :is(p, ul, ol, blockquote, table, pre) { margin-block: 12px; }
+#chatContent #conversation :is(h1, h2, h3, h4, h5, h6) { font-weight: 600; line-height: 1.4; margin: 24px 0 10px; }
+#chatContent #conversation h1 { font-size: 1.55em; }
+#chatContent #conversation h2 { font-size: 1.3em; }
+#chatContent #conversation h3 { font-size: 1.12em; }
+#chatContent #conversation :is(ul, ol) { padding-inline-start: 24px; }
+#chatContent #conversation ul { list-style: disc; }
+#chatContent #conversation ol { list-style: decimal; }
+#chatContent #conversation li { margin-block: 5px; }
+#chatContent #conversation li > p { margin-block: 4px; }
+#chatContent #conversation strong { font-weight: 650; }
+#chatContent #conversation a { color: var(--ag-accent) !important; text-decoration: underline; text-underline-offset: 3px; }
+#chatContent #conversation blockquote { border-inline-start: 3px solid var(--ag-border-active) !important; padding: 4px 16px; color: var(--ag-muted) !important; background: var(--ag-thought-bg) !important; border-radius: 0 8px 8px 0; }
+#chatContent #conversation hr { border: 0; border-top: 1px solid var(--ag-border) !important; margin: 24px 0; }
+#chatContent #conversation :is(.text-muted-foreground, [class*="text-muted"]) { color: var(--ag-muted) !important; }
+#chatContent #conversation :is(.bg-background, .bg-card) { background: transparent !important; }
+#chatContent #conversation table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 13px; }
+#chatContent #conversation :is(th, td) { border: 1px solid var(--ag-border) !important; padding: 9px 13px; text-align: start; min-width: 100px; }
+#chatContent #conversation th { background: var(--ag-card) !important; font-weight: 600; }
+#chatContent #conversation tbody tr:nth-child(even) { background: var(--ag-thought-bg) !important; }
+
+/* One user bubble, without sticky desktop wrappers. */
+#chatContent #conversation [aria-label="User message"],
+#chatContent #conversation .sticky,
+#chatContent #conversation [class*="md-sticky-message-bleed"] {
+    position: static !important; top: auto !important; z-index: auto !important;
+    background: transparent !important; box-shadow: none !important; border: 0 !important;
+    padding: 0 !important; margin: 0 !important;
+}
+#chatContent #conversation [class*="md-sticky-message-bleed"]::before,
+#chatContent #conversation [class*="md-sticky-message-bleed"]::after { display: none !important; }
+#chatContent #conversation div[class*="bg-background"] { background: transparent !important; border: 0 !important; box-shadow: none !important; }
+#chatContent #conversation div[data-testid="user-input-step"],
+#chatContent #conversation div[class*="group/user-input-step"] {
+    background: var(--ag-user-bg) !important; color: var(--ag-user-text) !important;
+    border: 1px solid var(--ag-border) !important; border-radius: 18px !important;
+    padding: 12px 18px !important; margin: 14px 0 22px auto !important;
+    max-width: 85% !important; width: fit-content !important; box-shadow: none !important;
+}
+#chatContent #conversation :is([data-testid="user-input-step"], [class*="group/user-input-step"]) * {
+    background-color: transparent !important; border: 0 !important; box-shadow: none !important;
+}
+
+/* Target actual controls; an arbitrary button containing an icon is not a thought block. */
+#chatContent #conversation :is(button, [role="button"]) {
+    color: var(--ag-text) !important; background: transparent !important;
+    font-family: inherit !important;
+}
+#chatContent #conversation :is(.ag-snapshot-toggle, [data-testid="worked-for-collapsible"], summary) {
+    display: flex !important; align-items: center !important; gap: 9px !important;
+    width: fit-content; max-width: 100%; min-height: 38px; margin: 12px 0 !important;
+    padding: 8px 12px !important; border-radius: 10px !important;
+    background: var(--ag-thought-bg) !important; color: var(--ag-thought-text) !important;
+    border: 1px solid var(--ag-thought-border) !important; box-shadow: none !important;
+    font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1.5; cursor: pointer; text-align: start;
+    transition: background-color .15s, border-color .15s; list-style: none;
+}
+#chatContent #conversation summary::-webkit-details-marker { display: none; }
+#chatContent #conversation summary::before { content: '›'; font-size: 18px; line-height: 1; transition: transform .15s; }
+#chatContent #conversation details[open] > summary::before { transform: rotate(90deg); }
+#chatContent #conversation :is(.ag-snapshot-action, .ag-load-older-btn) {
+    display: inline-flex !important; align-items: center; justify-content: center; gap: 7px;
+    min-height: 36px; padding: 7px 13px !important; margin: 6px 4px 6px 0;
+    border: 1px solid var(--ag-border-active) !important; border-radius: 8px !important;
+    background: var(--ag-card) !important; color: var(--ag-text) !important;
+    box-shadow: none !important; font-family: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+#chatContent #conversation :is(.ag-snapshot-toggle, .ag-snapshot-action, .ag-load-older-btn, summary):is(:hover, :focus-visible) {
+    background: var(--ag-hover) !important; color: var(--ag-text) !important;
+    border-color: var(--ag-border-active) !important;
+}
+#chatContent #conversation :is(.ag-snapshot-toggle, .ag-snapshot-action, summary) * { background: transparent !important; box-shadow: none !important; }
+#chatContent #conversation :is(button, [role="button"], summary):focus-visible { outline: 2px solid var(--ag-accent) !important; outline-offset: 3px; }
+
+/* Markdown code keeps a readable foreground even when the source uses inline black. */
+#chatContent #conversation :is(pre, code) { font-family: 'JetBrains Mono', Consolas, monospace !important; color: var(--ag-code-text) !important; background: var(--ag-code-bg) !important; }
+#chatContent #conversation :not(pre) > code { padding: 2px 5px; border: 1px solid var(--ag-code-border); border-radius: 5px; font-size: .88em; }
+#chatContent #conversation pre { width: 100%; max-width: 100%; padding: 0 !important; margin: 16px 0 !important; border: 1px solid var(--ag-code-border) !important; border-radius: 11px !important; overflow: hidden !important; white-space: pre !important; line-height: 1.65; }
+#chatContent #conversation pre > code { display: block; padding: 14px 16px !important; max-width: 100%; overflow-x: auto !important; white-space: pre !important; font-size: 12px; border: 0; border-radius: 0; }
+#chatContent #conversation .codex-code-bar { display: flex !important; align-items: center; justify-content: space-between; padding: 7px 12px; background: var(--ag-code-header) !important; color: var(--ag-muted) !important; border-bottom: 1px solid var(--ag-code-border); font: 12px/1.5 system-ui, sans-serif; }
+#chatContent #conversation .codex-copy-btn { display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px; border: 0; border-radius: 5px; color: var(--ag-muted) !important; background: transparent !important; cursor: pointer; font: inherit; }
+#chatContent #conversation .codex-copy-btn:hover { background: var(--ag-hover) !important; color: var(--ag-text) !important; }
+#chatContent #conversation pre :is(.token.keyword, .token.operator, .hljs-keyword, .hljs-built_in) { color: var(--ag-keyword) !important; }
+#chatContent #conversation pre :is(.token.string, .hljs-string, .hljs-attr) { color: var(--ag-string) !important; }
+#chatContent #conversation pre :is(.token.number, .token.boolean, .hljs-number, .hljs-literal) { color: var(--ag-number) !important; }
+#chatContent #conversation pre :is(.token.comment, .hljs-comment) { color: var(--ag-comment) !important; }
+[data-theme="dark"] #chatContent #conversation pre [style*="--shiki-dark"] { color: var(--shiki-dark, var(--ag-code-text)) !important; }
+[data-theme="light"] #chatContent #conversation pre [style*="--shiki-light"] { color: var(--shiki-light, var(--ag-code-text)) !important; }
+/* The desktop uses flex columns with gap utilities for Markdown. Use document
+   flow here so paragraph margins and those gaps never accumulate. */
+#chatContent #conversation .ag-markdown {
+    display: block !important; gap: 0 !important; padding: 0 !important;
+    margin: 14px 0 16px !important; max-width: 100% !important;
+    color: var(--ag-text) !important; background: transparent !important;
+    font: inherit !important; text-wrap: pretty;
+}
+#chatContent #conversation [data-testid="planner-response-text"] { padding: 0 !important; }
+#chatContent #conversation .ag-markdown > :first-child { margin-top: 0 !important; }
+#chatContent #conversation .ag-markdown > :last-child { margin-bottom: 0 !important; }
+#chatContent #conversation .ag-markdown p { margin: 0 0 12px !important; line-height: 1.85 !important; }
+#chatContent #conversation .ag-markdown :is(h1, h2, h3, h4, h5, h6) {
+    padding: 0 !important; margin: 26px 0 10px !important; line-height: 1.45 !important;
+    font-weight: 600 !important; letter-spacing: -.02em; border: 0 !important;
+}
+#chatContent #conversation .ag-markdown h1 { font-size: 1.48em !important; }
+#chatContent #conversation .ag-markdown h2 { font-size: 1.25em !important; }
+#chatContent #conversation .ag-markdown h3 { font-size: 1.08em !important; }
+#chatContent #conversation .ag-markdown :is(h4, h5, h6) { font-size: 1em !important; }
+#chatContent #conversation .ag-markdown :is(ul, ol) { margin: 10px 0 16px !important; padding-inline-start: 23px !important; }
+#chatContent #conversation .ag-markdown li { padding-inline-start: 3px; margin: 6px 0 !important; line-height: 1.8; }
+#chatContent #conversation .ag-markdown li::marker { color: var(--ag-muted) !important; font-size: .88em; }
+#chatContent #conversation .ag-markdown li > :is(ul, ol) { margin-block: 5px !important; }
+#chatContent #conversation .ag-markdown li > p { margin: 0 0 5px !important; }
+#chatContent #conversation .ag-markdown .contains-task-list { list-style: none !important; padding-inline-start: 0 !important; }
+#chatContent #conversation .ag-markdown .task-list-item { list-style: none !important; padding-inline-start: 0; }
+#chatContent #conversation .ag-markdown input[type="checkbox"] { accent-color: var(--ag-accent); margin-inline-end: 7px; vertical-align: middle; }
+#chatContent #conversation .ag-markdown blockquote { margin: 16px 0 !important; padding: 10px 16px !important; border-inline-start-width: 2px !important; border-radius: 0 7px 7px 0; }
+#chatContent #conversation .ag-markdown blockquote > :last-child { margin-bottom: 0 !important; }
+#chatContent #conversation .ag-markdown :not(pre) > code { padding: 2px 5px !important; font-size: .86em !important; border-radius: 5px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+#chatContent #conversation .ag-markdown a { text-decoration-color: var(--ag-border-active); transition: text-decoration-color .15s; }
+#chatContent #conversation .ag-markdown a:hover { text-decoration-color: currentColor; }
+#chatContent #conversation .ag-markdown :is(img, video) { display: block; max-width: 100%; height: auto; border-radius: 10px; margin: 16px 0; }
+#chatContent #conversation .ag-markdown .inline-pill { display: inline-flex !important; align-items: center !important; vertical-align: baseline !important; gap: 4px !important; padding: 0 2px !important; min-height: 22px; border-radius: 4px; font-size: .9em !important; }
+#chatContent #conversation .ag-markdown .inline-pill span { align-items: center !important; line-height: 1.5 !important; }
+#chatContent #conversation .ag-markdown .inline-pill code { padding: 0 !important; border: 0 !important; background: transparent !important; line-height: 1.5 !important; font-size: 1em !important; }
+#chatContent #conversation .ag-markdown .inline-pill img { display: inline-block !important; margin: 0 !important; width: 14px !important; height: 14px !important; min-width: 14px !important; min-height: 14px !important; border-radius: 0; }
+
+/* A single restrained file-change card, based on .files-changed-header from
+   Antigravity, rather than styling only the nested Review button. */
+#chatContent #conversation .ag-review-card {
+    display: flex !important; flex-direction: column !important; gap: 0 !important;
+    width: 100% !important; margin: 12px 0 20px !important; padding: 0 !important;
+    border: 1px solid var(--ag-review-border) !important; border-radius: 12px !important;
+    background: var(--ag-review-bg) !important; overflow: hidden; box-shadow: none !important;
+    font-size: 13px; line-height: 1.6;
+}
+#chatContent #conversation [data-testid="turn-cards-container"] { padding: 0 !important; gap: 8px !important; }
+#chatContent #conversation .ag-review-header {
+    display: grid !important; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center !important; gap: 16px !important; min-height: 64px;
+    width: 100% !important; margin: 0 !important; padding: 13px 16px !important;
+    border: 0 !important; border-radius: 0 !important; cursor: pointer;
+    background: transparent !important; color: var(--ag-text) !important;
+    transition: background-color .15s;
+}
+#chatContent #conversation .ag-review-header:hover { background: var(--ag-review-hover) !important; }
+#chatContent #conversation .ag-review-header:focus-visible { outline: 2px solid var(--ag-accent) !important; outline-offset: -3px; }
+#chatContent #conversation .ag-review-summary:focus-visible { outline: 2px solid var(--ag-accent) !important; outline-offset: 4px; border-radius: 3px; }
+#chatContent #conversation .ag-review-summary {
+    display: flex !important; flex-wrap: wrap !important; align-items: center !important;
+    gap: 8px 10px !important; min-width: 0; overflow: visible !important;
+    font-size: 13px !important; color: var(--ag-text) !important;
+}
+#chatContent #conversation .ag-review-summary > span { font-weight: 550; }
+#chatContent #conversation .ag-review-summary > div { display: inline-flex !important; align-items: center; gap: 7px !important; font-size: 12px !important; font-variant-numeric: tabular-nums; }
+#chatContent #conversation .ag-review-card [class~="text-green-500"] { color: var(--ag-insert) !important; }
+#chatContent #conversation .ag-review-card [class~="text-red-500"] { color: var(--ag-delete) !important; }
+#chatContent #conversation .ag-review-summary > svg { width: 13px !important; height: 13px !important; color: var(--ag-muted) !important; opacity: .7; }
+#chatContent #conversation .ag-review-summary[aria-expanded="true"] > svg { transform: rotate(90deg) !important; }
+#chatContent #conversation .ag-review-summary[aria-expanded="false"] > svg { transform: none !important; }
+#chatContent #conversation .ag-review-header[aria-busy="true"] { cursor: progress; opacity: .7; }
+#chatContent #conversation .ag-review-header .ag-review-button {
+    display: inline-flex !important; align-items: center; justify-content: center; gap: 7px !important;
+    min-height: 32px; margin: 0 !important; padding: 6px 11px !important;
+    border: 1px solid var(--ag-review-border) !important; border-radius: 7px !important;
+    background: var(--ag-review-button) !important; color: var(--ag-text) !important;
+    font: 500 12px/1.5 'Inter', system-ui, sans-serif !important; box-shadow: none !important;
+}
+#chatContent #conversation .ag-review-header .ag-review-button:hover { border-color: var(--ag-border-active) !important; background: var(--ag-hover) !important; }
+#chatContent #conversation .ag-review-card > :not(.ag-review-header) { border-top: 1px solid var(--ag-review-border); padding: 8px 12px; background: transparent !important; }
+#chatContent #conversation .ag-review-card .ag-review-button svg { width: 14px !important; height: 14px !important; opacity: .8; }
+
+/* Normalize real code-line blocks to one toolbar and one scrollable code body. */
+#chatContent #conversation pre { margin: 16px 0 20px !important; border-radius: 10px !important; background: var(--ag-code-bg) !important; }
+#chatContent #conversation pre > code { font-size: 12.5px !important; line-height: 1.75 !important; padding: 15px 17px !important; tab-size: 4; overflow-wrap: normal; word-break: normal; }
+#chatContent #conversation pre > code:focus-visible { outline: 2px solid var(--ag-accent) !important; outline-offset: -3px; }
+#chatContent #conversation .codex-code-bar { min-height: 37px; height: auto !important; padding: 6px 12px !important; background: var(--ag-code-bg) !important; font-size: 11px !important; }
+#chatContent #conversation .codex-code-lang { color: var(--ag-muted) !important; font-size: 11px !important; letter-spacing: 0 !important; }
+#chatContent #conversation .ag-table-scroll { width: 100%; max-width: 100%; overflow-x: auto; margin: 16px 0 20px; border: 1px solid var(--ag-review-border); border-radius: 10px; overscroll-behavior-x: contain; }
+#chatContent #conversation .ag-table-scroll table { display: table !important; width: 100% !important; max-width: none !important; margin: 0 !important; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+#chatContent #conversation .ag-table-scroll :is(th, td) { border: 0 !important; border-bottom: 1px solid var(--ag-review-border) !important; padding: 10px 13px !important; vertical-align: top; }
+#chatContent #conversation .ag-table-scroll th { background: var(--ag-review-bg) !important; color: var(--ag-muted) !important; font-size: 12px; font-weight: 500; white-space: nowrap; }
+#chatContent #conversation .ag-table-scroll tbody tr:last-child td { border-bottom: 0 !important; }
+#chatContent #conversation .ag-table-scroll tbody tr:nth-child(even) { background: transparent !important; }
+@media (max-width: 767px) {
+    #chatContent #conversation { font-size: 14px !important; }
+    #chatContent #conversation :is(th, td) { min-width: 90px; padding: 8px 10px; }
+    #chatContent #conversation .ag-review-header { min-height: 62px; gap: 10px !important; padding: 12px !important; }
+    #chatContent #conversation .ag-review-summary { gap: 5px 7px !important; font-size: 12px !important; }
+    #chatContent #conversation .ag-review-summary > div { font-size: 11px !important; }
+    #chatContent #conversation .ag-review-summary > svg { display: none; }
+    #chatContent #conversation .ag-review-header .ag-review-button { padding: 6px 9px !important; }
+    #chatContent #conversation pre > code { font-size: 12px !important; padding: 12px 13px !important; }
+}

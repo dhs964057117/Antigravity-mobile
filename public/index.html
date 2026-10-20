@@ -3,12 +3,14 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Antigravity Mobile & Desktop</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=4.4">
+    <link rel="stylesheet" href="css/style.css?v=4.7">
+    <link rel="stylesheet" href="css/workspace.css?v=4.7">
+    <link rel="stylesheet" href="css/snapshot.css?v=4.7">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self';">
@@ -31,7 +33,7 @@
                     </div>
                     <div class="brand-text">
                         <span class="brand-title">Antigravity</span>
-                        <span class="brand-badge">Mobile & Web</span>
+                        <span class="brand-badge">远程工作区</span>
                     </div>
                 </div>
                 <button class="icon-btn sidebar-close-btn" id="sidebarCloseBtn" aria-label="关闭侧边栏" title="关闭侧边栏">
@@ -41,6 +43,11 @@
                     </svg>
                 </button>
             </div>
+
+            <button class="workspace-search-trigger" id="commandPaletteBtn" aria-haspopup="dialog" aria-controls="commandPalette">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+                <span>搜索会话与命令</span><kbd>Ctrl K</kbd>
+            </button>
 
             <!-- New Chat Action -->
             <div class="sidebar-top-actions">
@@ -62,7 +69,7 @@
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                 </svg>
-                <input type="text" id="sidebarSearchInput" placeholder="搜索历史会话..." autocomplete="off" />
+                <input type="text" id="sidebarSearchInput" placeholder="筛选会话…" aria-label="筛选会话列表" autocomplete="off" />
                 <button class="sidebar-search-clear" id="sidebarSearchClear" style="display:none;" aria-label="清空搜索">×</button>
             </div>
 
@@ -125,12 +132,15 @@
                             <span class="status-dot disconnected" id="statusDot"></span>
                             <span class="status-text" id="statusText">连接中...</span>
                             <span class="meta-separator">·</span>
-                            <span class="stats-text" id="statsText">0 Nodes · 0KB</span>
+                            <span class="stats-text" id="statsText">等待同步</span>
                         </div>
                     </div>
                 </div>
 
                 <div class="header-right">
+                    <button class="icon-btn command-mobile-btn" id="headerCommandBtn" aria-label="搜索会话与快捷命令" title="快捷命令 (Ctrl+K)" aria-haspopup="dialog" aria-controls="commandPalette">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 5-5 7 5 7M16 5l5 7-5 7M14 4l-4 16"/></svg>
+                    </button>
                     <!-- Mode Pill (Turbo / Fast / Planning) -->
                     <button class="header-pill mode-pill" id="modeBtn" title="切换执行模式">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -148,7 +158,7 @@
                     </button>
 
                     <!-- Stop Generation Button -->
-                    <button class="stop-btn" id="stopBtn" title="停止生成">
+                    <button class="stop-btn" id="stopBtn" hidden title="停止生成">
                         <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">
                             <rect x="5" y="5" width="14" height="14" rx="2" />
                         </svg>
@@ -260,7 +270,7 @@
 
                     <!-- Input Card -->
                     <div class="input-card" id="inputCard">
-                        <textarea id="messageInput" placeholder="给 Antigravity 发送消息... (Shift+Enter 换行)" rows="1"></textarea>
+                        <textarea id="messageInput" aria-label="消息草稿" placeholder="给 Antigravity 发送消息... (Shift+Enter 换行)" rows="1"></textarea>
                         <div class="input-actions-bar">
                             <span class="desktop-send-hint" id="desktopSendHint">Enter 发送 · Shift+Enter 换行</span>
                             <button class="send-btn" id="sendBtn" aria-label="发送消息" title="发送">
@@ -274,6 +284,11 @@
                         </div>
                     </div>
 
+                    <div class="composer-feedback" aria-live="polite" aria-atomic="true">
+                        <span id="composerStatus" data-state="idle">输入消息开始协作</span>
+                        <button class="composer-command-btn" id="composerCommandBtn" aria-haspopup="dialog" aria-controls="commandPalette">快捷命令 <kbd>Ctrl K</kbd></button>
+                    </div>
+
                     <!-- Codex Disclaimer Footnote -->
                     <div class="composer-disclaimer">
                         <span>Antigravity 可能会产生误差。请核查重要信息。</span>
@@ -283,21 +298,35 @@
         </main>
     </div>
 
+    <div class="command-overlay" id="commandPalette" hidden>
+        <section class="command-dialog" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+            <h2 id="commandPaletteTitle" class="sr-only">搜索会话与快捷命令</h2>
+            <div class="command-search-row">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+                <input id="commandSearchInput" role="combobox" aria-label="搜索会话、项目或操作" aria-expanded="false" aria-controls="commandResults" aria-autocomplete="list" placeholder="搜索会话、项目或操作…" autocomplete="off" spellcheck="false">
+                <button class="command-close" id="closeCommandPaletteBtn" aria-label="关闭快捷命令">Esc</button>
+            </div>
+            <div class="command-results" id="commandResults" role="listbox" aria-label="搜索结果"></div>
+            <div class="command-footer"><span id="commandResultCount" aria-live="polite"></span><span><kbd>↑</kbd><kbd>↓</kbd> 选择 <kbd>Enter</kbd> 打开</span></div>
+        </section>
+    </div>
+
     <!-- Modal 1: 切换模型 (Model Switcher Modal) -->
     <div class="modal-overlay" id="modelModalOverlay">
-        <div class="modal-card modal-large" id="modelModalCard">
+        <div class="modal-card modal-large" id="modelModalCard" role="dialog" aria-modal="true" aria-labelledby="modelModalTitle" tabindex="-1">
             <div class="modal-card-header">
                 <div>
-                    <h3 class="modal-title">切换底层 AI 模型</h3>
-                    <p class="modal-subtitle">选择适用于当前编码与推理任务的基座大模型</p>
+                    <h3 class="modal-title" id="modelModalTitle">选择模型</h3>
+                    <p class="modal-subtitle">按名称或厂商搜索，切换后同步至当前桌面会话</p>
                 </div>
                 <button class="modal-close-icon" id="closeModelModalBtn" aria-label="关闭">×</button>
             </div>
-            <div class="model-cards-grid" id="modelCardsGrid">
+            <div class="model-search-row"><input type="search" id="modelSearchInput" placeholder="搜索模型、厂商…" aria-label="搜索模型" autocomplete="off"></div>
+            <div class="model-cards-grid" id="modelCardsGrid" aria-label="可用模型">
                 <!-- Dynamically populated from /models -->
             </div>
             <div class="modal-card-footer">
-                <span class="modal-footer-note">切换模型将同步应用至桌面端当前会话</span>
+                <span class="modal-footer-note" id="modelSelectionStatus" role="status" aria-live="polite">选择要使用的模型</span>
                 <button class="modal-btn-cancel" id="cancelModelModalBtn">取消</button>
             </div>
         </div>
@@ -365,7 +394,7 @@
         </div>
     </div>
 
-    <script src="js/app.js?v=4.4"></script>
+    <script src="js/app.js?v=4.7"></script>
 </body>
 
 </html>

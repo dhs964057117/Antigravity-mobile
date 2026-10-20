@@ -153,6 +153,7 @@ async function discoverCDP() {
 // Capture chat snapshot
 async function captureSnapshot(cdp) {
     const CAPTURE_SCRIPT = `(async () => {
+        const snapshotPath = window.location.pathname;
         const cascade = document.getElementById('conversation') || 
                         document.getElementById('chat') || 
                         document.getElementById('cascade') ||
@@ -198,6 +199,9 @@ async function captureSnapshot(cdp) {
         clone.id = 'conversation';
         clone.classList.remove('theme-light', 'theme-dark');
         clone.classList.add('antigravity-snapshot-root');
+        // Styles are collected separately and scoped by the web client. Embedded
+        // stylesheets must not bypass that isolation when the clone is rendered.
+        clone.querySelectorAll('style, script, link[rel="stylesheet"]').forEach(el => el.remove());
         clone.style.height = 'auto';
         clone.style.minHeight = '100%';
         clone.style.maxHeight = 'none';
@@ -454,8 +458,10 @@ async function captureSnapshot(cdp) {
             };
         }
 
+        if (window.location.pathname !== snapshotPath) return { error: 'conversation changed' };
         return {
             html: html,
+            conversationId: (window.location.pathname.startsWith('/c/') ? window.location.pathname.split('/')[2] : ''),
             css: allCSS,
             backgroundColor: cascadeStyles.backgroundColor,
             color: cascadeStyles.color,
@@ -518,6 +524,20 @@ export async function injectMessage(cdp, text, options = {}) {
             return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
         }
 
+        const conversationGuard = options.conversationId !== undefined
+            ? `if ((window.location.pathname.startsWith('/c/') ? window.location.pathname.split('/')[2] : '') !== ${JSON.stringify(options.conversationId)}) throw new Error('Conversation changed');`
+            : '';
+        if (options.conversationId !== undefined) {
+            let matches = false;
+            for (const context of [...cdp.contexts]) {
+                const result = await cdp.call('Runtime.evaluate', {
+                    expression: `(window.location.pathname.startsWith('/c/') ? window.location.pathname.split('/')[2] : '') === ${JSON.stringify(options.conversationId)}`,
+                    contextId: context.id, returnByValue: true
+                });
+                if (result.result?.value === true) { matches = true; break; }
+            }
+            if (!matches) return { ok: false, error: 'conversation_changed', message: '桌面会话已切换，请同步当前会话后再发送；草稿已保留' };
+        }
         const forceSteer = options.isSteer === true;
         console.log(`[SEND] Processing message (chars: ${text.length}, forceSteer=${forceSteer})...`);
 
@@ -632,6 +652,7 @@ export async function injectMessage(cdp, text, options = {}) {
         const readEditor = async (select = false) => {
             const res = await cdp.call('Runtime.evaluate', {
                 expression: `(() => {
+                    ${submissionStarted && options.conversationId === '' ? '' : conversationGuard}
                     const target = document.querySelector('[data-ag-active-target="true"]');
                     if (!target || !target.isConnected) return { found: false };
                     if (${select}) {
@@ -678,6 +699,7 @@ export async function injectMessage(cdp, text, options = {}) {
             submissionStarted = true;
             const res = await cdp.call('Runtime.evaluate', {
                 expression: `(() => {
+                    ${conversationGuard}
                     const target = document.querySelector('[data-ag-active-target="true"]');
                     if (!target) throw new Error('Editor lost before submit');
                     const container = target.closest('[id*="agentSidePanelInputBox"]') || target.parentElement;
@@ -700,6 +722,7 @@ export async function injectMessage(cdp, text, options = {}) {
             // Re-focus only; do not select or erase the message before Enter.
             const focus = await cdp.call('Runtime.evaluate', {
                 expression: `(() => {
+                    ${conversationGuard}
                     const target = document.querySelector('[data-ag-active-target="true"]');
                     target?.focus();
                     return !!target && (document.activeElement === target || target.contains(document.activeElement));
@@ -1671,10 +1694,10 @@ async function hasChatOpen(cdp) {
 }
 
 // Get App State (Mode & Model)
-async function getAppState(cdp) {
+export async function getAppState(cdp) {
     const EXP = `(async () => {
     try {
-        const state = { mode: 'Turbo', model: 'Select Model' };
+        const state = { mode: 'Turbo', model: 'Select Model', conversationId: (window.location.pathname.startsWith('/c/') ? window.location.pathname.split('/')[2] : '') };
 
         // 1. Get Mode (Turbo / Default / Request Review / Fast / Planning)
         const presetBtn = document.querySelector('[data-testid="permissions-selector-trigger"], button[aria-label*="permissions preset"], button[aria-label*="preset selector"]');
@@ -1825,7 +1848,7 @@ async function startPolling(wss) {
             const snapshot = await captureSnapshot(connection);
             if (connection !== cdpConnection || connection.ws.readyState !== WebSocket.OPEN) return setTimeout(poll, POLL_INTERVAL);
             if (snapshot && !snapshot.error) {
-                const hash = hashString(snapshot.html);
+                const hash = hashString(`${snapshot.conversationId || ''}\n${snapshot.html}`);
 
                 // Only update if content changed
                 if (hash !== lastSnapshotHash) {
@@ -2073,20 +2096,23 @@ export async function createServer() {
 
     // Send message (single writer + receipts for lost HTTP responses).
     app.post('/send', asyncRoute(async (req, res) => {
-        const { message, isSteer = false, requestId } = req.body || {};
+        const { message, isSteer = false, requestId, conversationId } = req.body || {};
         if (typeof message !== 'string' || !message.trim() || message.length > 100000) {
             return res.status(400).json({ success: false, ok: false, error: 'invalid_message', message: '请输入有效消息（最多 100000 字符）' });
         }
         if (requestId !== undefined && (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId))) {
             return res.status(400).json({ success: false, ok: false, error: 'invalid_request_id' });
         }
-        const payload = { message: message.trim(), isSteer: !!isSteer };
+        if (conversationId !== undefined && (typeof conversationId !== 'string' || !/^[A-Za-z0-9_-]{0,128}$/.test(conversationId))) {
+            return res.status(400).json({ success: false, ok: false, error: 'invalid_conversation_id' });
+        }
+        const payload = { message: message.trim(), isSteer: !!isSteer, ...(conversationId !== undefined ? { conversationId } : {}) };
         const response = await sends.run(requestId, payload, async () => {
             const connection = cdpConnection;
             if (!connection || connection.ws.readyState !== WebSocket.OPEN) {
                 return { status: 503, body: { success: false, ok: false, error: 'cdp_disconnected', message: '桌面连接正在恢复，请稍后重试' } };
             }
-            const result = await injectMessage(connection, payload.message, { isSteer: payload.isSteer });
+            const result = await injectMessage(connection, payload.message, { isSteer: payload.isSteer, conversationId: payload.conversationId });
             return { status: result.ok ? 200 : 400, body: { ...result, success: result.ok === true, ok: result.ok === true } };
         });
         res.setHeader('Cache-Control', 'no-store');

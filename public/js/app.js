@@ -63,6 +63,11 @@ const steerStatusBanner = document.getElementById('steerStatusBanner');
 const sendBtnIcon = document.getElementById('sendBtnIcon');
 const sendBtnLabel = document.getElementById('sendBtnLabel');
 const inputCard = document.getElementById('inputCard');
+const composerStatus = document.getElementById('composerStatus');
+const commandPalette = document.getElementById('commandPalette');
+const commandSearchInput = document.getElementById('commandSearchInput');
+const commandResults = document.getElementById('commandResults');
+const commandResultCount = document.getElementById('commandResultCount');
 
 // --- State Variables ---
 let autoRefreshEnabled = true;
@@ -73,6 +78,10 @@ let idleTimer = null;
 let currentMode = 'Turbo';
 let currentModel = 'Gemini 3.8 Flash High';
 let isSending = false;
+let isNavigating = false;
+let deliveryState = 'idle';
+let expectedSelectionId = null;
+let navigationOriginId = '';
 let authRedirecting = false;
 let isAgentBusy = false;
 let rawConversations = [];
@@ -105,309 +114,121 @@ function resolveTheme(pref) {
     return pref === 'light' ? 'light' : 'dark';
 }
 
+// Parse selectors with the browser's CSS parser, then contain every imported rule.
+// In particular, desktop :root, button and modal rules must never style our shell.
+function splitSnapshotSelectors(selector) {
+    const parts = [];
+    let start = 0, depth = 0, quote = '', escaped = false;
+    for (let i = 0; i < selector.length; i++) {
+        const char = selector[i];
+        if (escaped) { escaped = false; continue; }
+        if (char === '\\') { escaped = true; continue; }
+        if (quote) { if (char === quote) quote = ''; continue; }
+        if (char === '"' || char === "'") { quote = char; continue; }
+        if (char === '(' || char === '[') depth++;
+        if (char === ')' || char === ']') depth--;
+        if (char === ',' && depth === 0) { parts.push(selector.slice(start, i).trim()); start = i + 1; }
+    }
+    parts.push(selector.slice(start).trim());
+    return parts.filter(Boolean);
+}
+
+function scopeSnapshotRules(rules) {
+    return Array.from(rules).map(rule => {
+        if (rule.type === 1 && rule.selectorText) {
+            const selectors = splitSnapshotSelectors(rule.selectorText)
+                .map(selector => `:where(#chatContent) ${selector}`).join(', ');
+            return selectors + ' ' + rule.cssText.slice(rule.cssText.indexOf('{'));
+        }
+        // Keep layout queries and layers, but never import global fonts, properties or keyframes.
+        if (rule.cssRules && /^@(media|supports|container|layer)\b/i.test(rule.cssText)) {
+            return rule.cssText.slice(0, rule.cssText.indexOf('{')) + '{' + scopeSnapshotRules(rule.cssRules) + '}';
+        }
+        return '';
+    }).join('\n');
+}
+
 function generateSnapshotStyles(rawCss) {
-    return `/* --- BASE SNAPSHOT CSS --- */
-${rawCss || ''}
-
-/* --- THEME CSS VARIABLES & CODEX OVERRIDES --- */
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
-    --background: var(--bg-app) !important;
-    --foreground: var(--text-main) !important;
-    --card: var(--bg-card) !important;
-    --card-foreground: var(--text-main) !important;
-    --card-border: var(--border) !important;
-    --secondary: var(--bg-card) !important;
-    --secondary-foreground: var(--text-main) !important;
-    --muted: var(--bg-panel) !important;
-    --muted-foreground: var(--text-muted) !important;
-    --border: var(--border) !important;
-    --primary: var(--accent) !important;
-    --primary-foreground: #ffffff !important;
-    --accent: var(--accent) !important;
-    --accent-foreground: #ffffff !important;
-    --popover: var(--bg-card) !important;
-    --popover-foreground: var(--text-main) !important;
-    --max-conversation-width: 100% !important;
-    color: var(--text-main) !important;
-    background-color: transparent !important;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
-    position: relative !important;
-    height: auto !important;
-    min-height: 100% !important;
-    width: 100% !important;
-    overflow: visible !important;
-    display: block !important;
-    padding-right: 0px !important;
+    if (!rawCss || typeof CSSStyleSheet === 'undefined') return '';
+    try {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(rawCss);
+        return scopeSnapshotRules(sheet.cssRules);
+    } catch (e) {
+        // Base Markdown styling remains usable if a desktop stylesheet cannot be parsed.
+        return '';
+    }
 }
 
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
-    container-type: normal !important;
+function decorateSnapshotControls() {
+    chatContent.querySelectorAll('button, [role="button"], summary, [data-testid="worked-for-collapsible"]').forEach(control => {
+        if (control.matches('.codex-copy-btn, .ag-review-summary')) return;
+        const text = (control.innerText || control.textContent || '').trim();
+        const thought = control.matches('[data-testid="worked-for-collapsible"], summary') ||
+            (text.length < 180 && /^(thought|thinking|worked for|思考|已思考|正在思考|edited|changed|\d+\s+files?\b)/i.test(text));
+        const action = text.length < 100 && /^(review|open|view|run|allow|deny|accept|reject|confirm|审查|查看|打开|运行|允许|拒绝|确认)\b/i.test(text);
+        control.classList.toggle('ag-snapshot-toggle', thought);
+        control.classList.toggle('ag-snapshot-action', !thought && action);
+    });
 }
 
-#conversation p, #conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation li, #conversation td, #conversation th {
-    color: var(--text-main) !important;
-    font-size: 15px;
-    line-height: 1.68;
+function snapshotCodeText(pre) {
+    const lines = Array.from(pre.querySelectorAll('.code-line'));
+    if (lines.length) return lines.map(line => (line.querySelector('.line-content') || line).textContent || '').join('\n');
+    return (pre.querySelector('code') || pre).textContent || '';
 }
 
-#conversation h1, #conversation h2, #conversation h3 {
-    color: var(--text-main) !important;
-    font-weight: 600;
-    margin-top: 18px;
-    margin-bottom: 8px;
-}
-
-/* Explicit Dark Theme Rules for Antigravity Snapshot */
-[data-theme="dark"] #conversation,
-[data-theme="dark"] .antigravity-snapshot-root {
-    color-scheme: dark !important;
-    color: #ececec !important;
-    background-color: transparent !important;
-}
-[data-theme="dark"] #conversation p,
-[data-theme="dark"] #conversation h1,
-[data-theme="dark"] #conversation h2,
-[data-theme="dark"] #conversation h3,
-[data-theme="dark"] #conversation h4,
-[data-theme="dark"] #conversation li,
-[data-theme="dark"] #conversation td,
-[data-theme="dark"] #conversation th {
-    color: #ececec !important;
-}
-[data-theme="dark"] #conversation .bg-background {
-    background-color: transparent !important;
-}
-[data-theme="dark"] #conversation .text-muted-foreground,
-[data-theme="dark"] #conversation [class*="text-muted"] {
-    color: #8e8e8e !important;
-}
-
-/* Explicit Light Theme Rules for Antigravity Snapshot */
-[data-theme="light"] #conversation,
-[data-theme="light"] .antigravity-snapshot-root {
-    color-scheme: light !important;
-    --background: #ffffff !important;
-    --foreground: #111827 !important;
-    --card: #f3f4f6 !important;
-    --card-foreground: #111827 !important;
-    --card-border: rgba(0, 0, 0, 0.08) !important;
-    --muted: #f3f4f6 !important;
-    --muted-foreground: #6b7280 !important;
-    --secondary: #f3f4f6 !important;
-    --secondary-foreground: #111827 !important;
-    --border: rgba(0, 0, 0, 0.09) !important;
-    color: #111827 !important;
-    background-color: transparent !important;
-}
-
-[data-theme="light"] #conversation p,
-[data-theme="light"] #conversation span:not([class*="badge"]):not([class*="bg-"]),
-[data-theme="light"] #conversation h1,
-[data-theme="light"] #conversation h2,
-[data-theme="light"] #conversation h3,
-[data-theme="light"] #conversation h4,
-[data-theme="light"] #conversation li,
-[data-theme="light"] #conversation td,
-[data-theme="light"] #conversation th {
-    color: #111827 !important;
-}
-
-[data-theme="light"] #conversation .text-muted-foreground,
-[data-theme="light"] #conversation [class*="text-muted"] {
-    color: #6b7280 !important;
-}
-
-[data-theme="light"] #conversation .bg-background {
-    background-color: transparent !important;
-}
-
-[data-theme="light"] #conversation .bg-card {
-    background-color: #f3f4f6 !important;
-    color: #111827 !important;
-}
-
-/* --- CANCEL STICKY POSITIONING (Fix user message floating at top) --- */
-#conversation [aria-label="User message"],
-#conversation .sticky,
-#conversation [class*="sticky"],
-#conversation [class*="md-sticky-message-bleed"] {
-    position: static !important;
-    top: auto !important;
-    z-index: 1 !important;
-    background: transparent !important;
-    box-shadow: none !important;
-    border: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
-}
-
-#conversation [class*="md-sticky-message-bleed"]::before,
-#conversation [class*="md-sticky-message-bleed"]::after {
-    display: none !important;
-}
-
-/* --- RESET OUTER WRAPPERS (Fix double bubble wrappers) --- */
-#conversation div[class*="bg-background"],
-#conversation div[class*="bg-background"]:has([class*="user-input-step"]) {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
-}
-
-/* --- SINGLE CLEAN USER MESSAGE BUBBLE --- */
-#conversation div[data-testid="user-input-step"],
-#conversation div[class*="group/user-input-step"] {
-    background: var(--bg-user-bubble) !important;
-    color: var(--text-user-bubble) !important;
-    border-radius: 18px !important;
-    border: 1px solid var(--border-user-bubble) !important;
-    padding: 12px 18px !important;
-    margin: 14px 0 !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
-    max-width: 82% !important;
-    margin-left: auto !important;
-    width: fit-content !important;
-    position: static !important;
-}
-
-/* --- REMOVE REDUNDANT INNER BLACK CARD BACKGROUNDS --- */
-#conversation div[data-testid="user-input-step"] *,
-#conversation div[class*="group/user-input-step"] * {
-    background: transparent !important;
-    background-color: transparent !important;
-    border: none !important;
-    border-color: transparent !important;
-    box-shadow: none !important;
-}
-
-#conversation div[data-testid="user-input-step"] [class*="max-h-"],
-#conversation div[class*="group/user-input-step"] [class*="max-h-"] {
-    max-height: none !important;
-    overflow: visible !important;
-}
-
-#conversation div[class*="group/user-input-step"] [data-quotable="true"] {
-    color: var(--text-user-bubble) !important;
-    font-size: 14.5px !important;
-    line-height: 1.6 !important;
-    background: transparent !important;
-}
-
-/* Thinking & Reasoning blocks - Codex collapsible thought */
-#conversation [data-testid="worked-for-collapsible"], 
-#conversation button[class*="tabular-nums"], 
-#conversation button:has(svg):has(span) {
-    background: var(--bg-thought) !important;
-    border: 1px solid var(--border-thought) !important;
-    border-radius: 8px !important;
-    color: var(--text-thought) !important;
-    padding: 6px 12px !important;
-    margin: 8px 0 !important;
-    display: flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    cursor: pointer !important;
-    font-size: 12.5px !important;
-    transition: all 0.15s ease !important;
-}
-
-#conversation [data-testid="worked-for-collapsible"]:hover,
-#conversation button[class*="tabular-nums"]:hover,
-#conversation button:has(svg):has(span):hover {
-    background: var(--bg-card-hover) !important;
-    border-color: var(--border-active) !important;
-    color: var(--text-main) !important;
-}
-
-/* Code Blocks - Codex Signature Code Box */
-pre, code, .monaco-editor-background, [class*="terminal"] {
-    background-color: var(--bg-code) !important;
-    color: var(--text-code) !important;
-    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
-    border-radius: 8px;
-    border: none;
-}
-
-pre {
-    position: relative !important;
-    white-space: pre-wrap !important;
-    word-break: break-word !important;
-    padding: 0 !important;
-    margin: 16px 0 !important;
-    width: 100% !important;
-    border: 1px solid var(--border-code) !important;
-    border-radius: 10px !important;
-    line-height: 1.55 !important;
-    overflow: hidden !important;
-}
-
-pre > code, pre:not(:has(> code)) {
-    display: block !important;
-    padding: 12px 16px 14px !important;
-    overflow-x: auto !important;
-}
-
-.codex-code-bar {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: space-between !important;
-    height: 36px !important;
-    background: var(--bg-code-header) !important;
-    border-bottom: 1px solid var(--border-code) !important;
-    padding: 0 14px !important;
-    user-select: none !important;
-}
-
-.codex-code-lang {
-    font-size: 12px !important;
-    font-weight: 500 !important;
-    color: var(--text-secondary) !important;
-    font-family: 'JetBrains Mono', Consolas, monospace !important;
-    text-transform: lowercase !important;
-    letter-spacing: 0.3px !important;
-}
-
-.codex-copy-btn {
-    background: transparent !important;
-    border: none !important;
-    color: var(--text-secondary) !important;
-    font-size: 12px !important;
-    font-family: 'Inter', system-ui, sans-serif !important;
-    cursor: pointer !important;
-    display: flex !important;
-    align-items: center !important;
-    gap: 6px !important;
-    padding: 4px 8px !important;
-    border-radius: 6px !important;
-    transition: all 0.15s ease !important;
-}
-
-.codex-copy-btn:hover {
-    color: var(--text-main) !important;
-    background: var(--border) !important;
-}
-
-/* History Load Older Button if rendered */
-.ag-load-older-btn {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    margin: 12px auto !important;
-    padding: 8px 18px !important;
-    border-radius: 9999px !important;
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text-secondary) !important;
-    font-size: 12px !important;
-    cursor: pointer !important;
-}
-
-.ag-load-older-btn:hover {
-    background: var(--bg-card-hover) !important;
-    color: var(--text-main) !important;
-}`;
+// Normalize the actual desktop markup before morphing it into the document.
+function prepareSnapshotContent(root) {
+    root.querySelectorAll('style, script, link[rel="stylesheet"]').forEach(el => el.remove());
+    root.querySelectorAll('[data-testid="planner-response-text"] > div, .md-divider-spacing, .prose, .markdown').forEach(el => {
+        if (!el.parentElement?.closest('.ag-markdown')) el.classList.add('ag-markdown');
+    });
+    root.querySelectorAll('.files-changed-header').forEach(header => {
+        header.classList.add('ag-review-header');
+        header.setAttribute('role', 'group');
+        header.setAttribute('aria-label', '文件变更');
+        header.firstElementChild?.classList.add('ag-review-summary');
+        const summary = header.firstElementChild;
+        if (summary && summary.tagName !== 'BUTTON') {
+            summary.setAttribute('role', 'button');
+            summary.setAttribute('tabindex', '0');
+            summary.setAttribute('aria-label', '展开或收起文件变更');
+            summary.setAttribute('aria-expanded', String(header.parentElement?.children.length > 1));
+        }
+        if (header.parentElement && header.parentElement !== root) header.parentElement.classList.add('ag-review-card');
+        header.querySelector('.review-button')?.classList.add('ag-review-button');
+    });
+    root.querySelectorAll('pre').forEach(pre => {
+        const lines = pre.querySelectorAll('.code-line');
+        const existingCode = pre.querySelector('code');
+        if (!lines.length && existingCode) { pre.replaceChildren(existingCode); return; }
+        const languageLabel = (pre.querySelector('.font-sans')?.textContent || '').trim().toLowerCase();
+        const code = document.createElement('code');
+        if (/^[a-z0-9_+#.-]{1,24}$/.test(languageLabel)) code.className = 'language-' + languageLabel;
+        if (lines.length) {
+            Array.from(lines).forEach((line, index) => {
+                if (index) code.appendChild(document.createTextNode('\n'));
+                const content = line.querySelector('.line-content') || line;
+                Array.from(content.childNodes).forEach(child => code.appendChild(child.cloneNode(true)));
+            });
+        } else if (pre.querySelector('.code-block')) {
+            Array.from(pre.querySelector('.code-block').childNodes).forEach(child => code.appendChild(child.cloneNode(true)));
+        } else {
+            while (pre.firstChild) code.appendChild(pre.firstChild);
+        }
+        pre.replaceChildren(code);
+    });
+    root.querySelectorAll('table').forEach(table => {
+        if (table.parentElement?.classList.contains('ag-table-scroll')) return;
+        const scroll = document.createElement('div');
+        scroll.className = 'ag-table-scroll';
+        scroll.setAttribute('role', 'region');
+        scroll.setAttribute('aria-label', '表格，可横向滚动');
+        scroll.setAttribute('tabindex', '0');
+        table.replaceWith(scroll);
+        scroll.appendChild(table);
+    });
 }
 
 function applyTheme(pref, save = true) {
@@ -444,11 +265,7 @@ function applyTheme(pref, save = true) {
         headerBtn.title = `深浅主题: ${label} (点击切换)`;
     }
 
-    // Update snapshot style tag if loaded
-    const styleTag = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('cdp-styles') : null;
-    if (styleTag && styleTag.dataset && styleTag.dataset.rawCss) {
-        styleTag.textContent = generateSnapshotStyles(styleTag.dataset.rawCss);
-    }
+
 }
 
 function cycleTheme() {
@@ -555,6 +372,7 @@ function updateSendButtonState() {
 // --- Steer / Interjection Mode Management ---
 function setSteerMode(isBusy) {
     isAgentBusy = !!isBusy;
+    stopBtn.hidden = !isAgentBusy;
     if (isAgentBusy) {
         if (steerStatusBanner) steerStatusBanner.style.display = 'flex';
         sendBtn.classList.add('steer-mode');
@@ -576,6 +394,7 @@ function setSteerMode(isBusy) {
         if (inputCard) inputCard.classList.remove('steer-focused');
     }
     updateSendButtonState();
+    updateComposerStatus();
 }
 
 // --- Auth Utilities ---
@@ -608,20 +427,115 @@ async function fetchWithAuth(url, options = {}) {
     }
 }
 
+const volatileSession = new Map();
 function readSession(key) {
+    if (volatileSession.has(key)) return volatileSession.get(key);
     try { return sessionStorage.getItem(key); } catch { return null; }
 }
 function saveSession(key, value) {
+    volatileSession.set(key, value);
     try {
         if (value === null) sessionStorage.removeItem(key);
         else sessionStorage.setItem(key, value);
-    } catch { /* Storage can be unavailable in private browsing. */ }
+        return true;
+    } catch { return false; /* Storage can be unavailable in private browsing. */ }
 }
-let pendingSend = null;
-try { pendingSend = JSON.parse(readSession('ag_pending_send')); } catch { /* Ignore old data. */ }
+// Drafts and retry receipts belong to a conversation, including unsent new chats.
+let activeConversationKey = readSession('ag_active_conversation') || 'unassigned';
+let activeConversationId = activeConversationKey.startsWith('id:') ? activeConversationKey.slice(3) : '';
+const draftKey = key => `ag_message_draft:${key}`;
+const pendingKey = key => `ag_pending_send:${key}`;
+function readPending(key) {
+    try {
+        const value = JSON.parse(readSession(pendingKey(key)));
+        return value && typeof value.message === 'string' && typeof value.requestId === 'string' ? value : null;
+    } catch { return null; }
+}
+let pendingSend = readPending(activeConversationKey);
+if (!pendingSend) {
+    try { pendingSend = JSON.parse(readSession('ag_pending_send')); } catch { /* Ignore old data. */ }
+}
 if (!pendingSend || typeof pendingSend.message !== 'string' || typeof pendingSend.requestId !== 'string') pendingSend = null;
-const restoredDraft = readSession('ag_message_draft') || pendingSend?.message;
+const restoredDraft = readSession(draftKey(activeConversationKey)) ?? readSession('ag_message_draft') ?? pendingSend?.message;
 if (restoredDraft) messageInput.value = restoredDraft;
+if (restoredDraft !== undefined && restoredDraft !== null) saveSession(draftKey(activeConversationKey), restoredDraft || null);
+if (pendingSend) saveSession(pendingKey(activeConversationKey), JSON.stringify(pendingSend));
+deliveryState = pendingSend ? 'uncertain' : restoredDraft ? 'draft' : 'idle';
+saveSession('ag_message_draft', null);
+saveSession('ag_pending_send', null);
+
+function conversationKey(chat) {
+    return chat.id ? `id:${chat.id}` : `title:${JSON.stringify([chat.workspace || '', chat.title || ''])}`;
+}
+function savePending() {
+    saveSession(pendingKey(activeConversationKey), pendingSend ? JSON.stringify(pendingSend) : null);
+}
+function persistComposerDraft() {
+    const saved = saveSession(draftKey(activeConversationKey), messageInput.value || null);
+    if (deliveryState !== 'sending') deliveryState = messageInput.value ? (saved ? 'draft' : 'memory') : 'idle';
+    updateComposerStatus();
+    sidebarConvoList.querySelectorAll('[data-draft-for]').forEach(badge => {
+        badge.hidden = !readSession(draftKey(badge.getAttribute('data-draft-for')));
+    });
+}
+function activateConversation(key, id = '', migrate = false) {
+    if (!key || key === activeConversationKey) return;
+    const oldKey = activeConversationKey;
+    persistComposerDraft();
+    savePending();
+    // First sync and the first submission of a new chat acquire a real ID.
+    if (migrate && readSession(draftKey(key)) === null) {
+        saveSession(draftKey(key), messageInput.value || null);
+        if (pendingSend) saveSession(pendingKey(key), JSON.stringify(pendingSend));
+        saveSession(draftKey(oldKey), null);
+        saveSession(pendingKey(oldKey), null);
+    }
+    activeConversationKey = key;
+    activeConversationId = id;
+    saveSession('ag_active_conversation', key);
+    pendingSend = readPending(key);
+    messageInput.value = readSession(draftKey(key)) ?? pendingSend?.message ?? '';
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+    deliveryState = pendingSend ? 'uncertain' : messageInput.value ? 'draft' : 'idle';
+    updateSendButtonState();
+    updateComposerStatus();
+    if (rawConversations.length) renderSidebarConversations(rawConversations);
+}
+function acceptsConversationId(id) {
+    if (expectedSelectionId) return id === expectedSelectionId;
+    if (expectedSelectionId === '' && id && id === navigationOriginId) return false;
+    return !isSending || !activeConversationId || id === activeConversationId;
+}
+function syncConversationId(id) {
+    if (isSending || isNavigating || typeof id !== 'string' || !acceptsConversationId(id)) return;
+    if (expectedSelectionId !== null) {
+        if (expectedSelectionId && id !== expectedSelectionId) return;
+        if (expectedSelectionId === '' && id && id === navigationOriginId) return;
+        expectedSelectionId = null;
+    }
+    if (!id) {
+        if (activeConversationId) activateConversation('unassigned');
+        return;
+    }
+    activateConversation(`id:${id}`, id, activeConversationKey === 'unassigned' || activeConversationKey.startsWith('new:'));
+}
+function updateComposerStatus() {
+    if (!composerStatus) return;
+    const state = isNavigating ? 'navigating' : isSending ? 'sending' : deliveryState;
+    const labels = { idle: isAgentBusy ? '智能体正在执行，可发送插话' : '输入消息开始协作', draft: '此会话草稿已保存', memory: '草稿保留在当前页面', navigating: '正在切换会话…', sending: '正在提交到桌面…', sent: '已提交到桌面', failed: '发送失败，草稿已保留', uncertain: '结果未确认，请检查会话后重试' };
+    const label = labels[state] || labels.idle;
+    if (composerStatus.textContent !== label) composerStatus.textContent = label;
+    composerStatus.setAttribute('data-state', state);
+    messageInput.readOnly = isNavigating;
+    sidebarNewChatBtn.disabled = isNavigating || isSending;
+    sendBtn.disabled = isNavigating || isSending;
+}
+let collapsedProjects = new Set();
+try {
+    const saved = JSON.parse(readSession('ag_collapsed_projects'));
+    if (Array.isArray(saved)) collapsedProjects = new Set(saved.filter(value => typeof value === 'string').slice(0, 200));
+} catch { /* Use expanded groups by default. */ }
 
 // --- Global Toast Notification ---
 function showToast(message, type = 'info', duration = 3500) {
@@ -688,6 +602,14 @@ function initSidebarState() {
         sidebar.classList.remove('open');
         sidebarBackdrop.classList.remove('show');
     }
+    syncSidebarAccessibility();
+}
+
+function syncSidebarAccessibility() {
+    const hidden = !isDesktop() && !sidebar.classList.contains('open');
+    sidebar.inert = hidden;
+    sidebar.setAttribute('aria-hidden', String(hidden));
+    sidebarToggleBtn.setAttribute('aria-expanded', String(!hidden && !sidebar.classList.contains('collapsed')));
 }
 
 function toggleSidebar() {
@@ -698,6 +620,7 @@ function toggleSidebar() {
         const isOpen = sidebar.classList.toggle('open');
         sidebarBackdrop.classList.toggle('show', isOpen);
     }
+    syncSidebarAccessibility();
 }
 
 function closeMobileSidebar() {
@@ -705,6 +628,7 @@ function closeMobileSidebar() {
         sidebar.classList.remove('open');
         sidebarBackdrop.classList.remove('show');
     }
+    syncSidebarAccessibility();
 }
 
 sidebarToggleBtn.addEventListener('click', toggleSidebar);
@@ -715,6 +639,7 @@ window.addEventListener('resize', () => {
     if (isDesktop() && sidebar.classList.contains('open')) {
         closeMobileSidebar();
     }
+    syncSidebarAccessibility();
 });
 
 // --- App State & Desktop Sync ---
@@ -736,6 +661,7 @@ async function fetchAppState() {
             modelText.textContent = data.model;
         }
 
+        if (typeof data.conversationId === 'string') syncConversationId(data.conversationId);
         if (data.isBusy !== undefined) {
             setSteerMode(data.isBusy);
         }
@@ -863,19 +789,26 @@ function updateStatus(connected, desktopConnected = true) {
 }
 
 // --- DOM Morphing for Flicker-Free Rendering ---
-function morphDOM(oldRoot, newRoot) {
+function morphDOM(oldRoot, newRoot, syncAttributes = true) {
     const oldAttrs = oldRoot.attributes;
     const newAttrs = newRoot.attributes;
+    const preserveDetails = oldRoot.tagName === 'DETAILS' && oldRoot.dataset.clientDetailsConversation === activeConversationKey &&
+        oldRoot.querySelector('summary')?.textContent === newRoot.querySelector('summary')?.textContent;
+    if (oldRoot.tagName === 'DETAILS' && !preserveDetails) {
+        delete oldRoot.dataset.clientDetailsConversation;
+    }
 
-    if (oldAttrs && newAttrs) {
+    if (syncAttributes && oldAttrs && newAttrs) {
         for (let i = oldAttrs.length - 1; i >= 0; i--) {
             const name = oldAttrs[i].name;
+            if (preserveDetails && name === 'open') continue;
             if (!newRoot.hasAttribute(name) && !name.startsWith('data-client-')) {
                 oldRoot.removeAttribute(name);
             }
         }
         for (let i = 0; i < newAttrs.length; i++) {
             const name = newAttrs[i].name;
+            if (preserveDetails && name === 'open') continue;
             const val = newAttrs[i].value;
             if (oldRoot.getAttribute(name) !== val) {
                 oldRoot.setAttribute(name, val);
@@ -884,7 +817,8 @@ function morphDOM(oldRoot, newRoot) {
     }
 
     const oldChildren = Array.from(oldRoot.childNodes).filter(
-        n => !(n.nodeType === Node.ELEMENT_NODE && n.classList.contains('mobile-copy-btn'))
+        n => !(n.nodeType === Node.ELEMENT_NODE && (n.classList.contains('mobile-copy-btn') ||
+            (oldRoot.tagName === 'PRE' && n.classList.contains('codex-code-bar'))))
     );
     const newChildren = Array.from(newRoot.childNodes);
 
@@ -933,6 +867,7 @@ async function loadSnapshot(isManual = false, options = {}) {
             }
         }
 
+        if (isNavigating) return;
         const res = await fetchWithAuth('/snapshot');
         if (!res.ok) {
             if (res.status === 503) {
@@ -946,6 +881,11 @@ async function loadSnapshot(isManual = false, options = {}) {
         }
 
         const data = await res.json();
+        if (isNavigating) return;
+        if (typeof data.conversationId === 'string') {
+            if (!acceptsConversationId(data.conversationId)) return;
+            syncConversationId(data.conversationId);
+        }
 
         // Scroll state preservation
         const scrollPos = chatContainer.scrollTop;
@@ -958,7 +898,7 @@ async function loadSnapshot(isManual = false, options = {}) {
         if (data.stats) {
             const kbs = Math.round((data.stats.htmlSize + data.stats.cssSize) / 1024);
             const nodes = data.stats.nodes;
-            if (statsText) statsText.textContent = `${nodes} Nodes · ${kbs}KB`;
+            if (statsText) statsText.textContent = '已同步 ' + new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
         }
 
         // CSS Injection (Cached & Theme Adaptive)
@@ -1022,14 +962,15 @@ async function loadSnapshot(isManual = false, options = {}) {
 
         if (isSnapshotEmpty) {
             renderCodexWelcomeScreen();
-        } else if (wasEmpty) {
-            chatContent.innerHTML = data.html;
         } else {
             const temp = document.createElement('div');
             temp.innerHTML = data.html;
-            morphDOM(chatContent, temp);
+            prepareSnapshotContent(temp);
+            if (wasEmpty) chatContent.replaceChildren(...temp.childNodes);
+            else morphDOM(chatContent, temp, false);
         }
 
+        decorateSnapshotControls();
         addCodexCodeHeaders();
 
         // Update steer mode from snapshot stats or flags
@@ -1121,11 +1062,9 @@ function renderCodexWelcomeScreen() {
 function addCodexCodeHeaders() {
     const codeBlocks = chatContent.querySelectorAll('pre');
     codeBlocks.forEach((pre) => {
-        if (pre.querySelector('.codex-code-bar')) return;
-
         const codeElement = pre.querySelector('code') || pre;
-        const textToCopy = (codeElement.textContent || codeElement.innerText).trim();
-        if (!/\n/.test(textToCopy)) return;
+        const textToCopy = snapshotCodeText(pre);
+        if (!textToCopy) return;
 
         // Detect language
         let lang = 'code';
@@ -1142,6 +1081,14 @@ function addCodexCodeHeaders() {
             else if (/@import|{\s*margin|{\s*padding|\.[\w-]+\s*\{/m.test(textToCopy)) lang = 'css';
         }
 
+        codeElement.setAttribute('tabindex', '0');
+        codeElement.setAttribute('role', 'region');
+        codeElement.setAttribute('aria-label', lang + ' 代码，可横向滚动');
+        const existingBar = pre.querySelector('.codex-code-bar');
+        if (existingBar) {
+            existingBar.querySelector('.codex-code-lang').textContent = lang;
+            return;
+        }
         const bar = document.createElement('div');
         bar.className = 'codex-code-bar';
         bar.innerHTML = `
@@ -1159,7 +1106,7 @@ function addCodexCodeHeaders() {
         copyBtn.addEventListener('click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const ok = await copyToClipboard(textToCopy);
+            const ok = await copyToClipboard(snapshotCodeText(pre));
             if (ok) {
                 copyBtn.classList.add('copied');
                 copyBtn.innerHTML = `
@@ -1178,6 +1125,8 @@ function addCodexCodeHeaders() {
                         <span class="copy-label">复制代码</span>
                     `;
                 }, 2000);
+            } else {
+                showToast('复制失败，请选择代码后手动复制', 'error');
             }
         });
 
@@ -1239,11 +1188,14 @@ async function loadSidebarHistory() {
         if (!res.ok || data.error) throw new Error(data.error || 'History unavailable');
         rawConversations = data.chats || [];
 
+        const current = rawConversations.find(chat => chat.isActive && chat.id);
+        if (current) syncConversationId(current.id);
         renderSidebarConversations(rawConversations);
+        if (paletteIsOpen) renderCommandResults();
 
         // Update header active session title
         const activeChat = rawConversations.find(c => c.isActive);
-        if (activeChat) {
+        if (activeChat && !isNavigating && (expectedSelectionId === null || (expectedSelectionId && activeChat.id === expectedSelectionId))) {
             headerSessionTitle.textContent = activeChat.title;
         }
     } catch (e) {
@@ -1258,11 +1210,16 @@ async function loadSidebarHistory() {
     }
 }
 
+let lastSidebarMarkup = null;
 function renderSidebarConversations(chats) {
+    const query = sidebarSearchInput.value.trim().toLowerCase();
+    if (query) chats = chats.filter(chat => `${chat.title} ${chat.workspace || ''}`.toLowerCase().includes(query));
+    sidebarSearchClear.style.display = query ? 'block' : 'none';
     if (chats.length === 0) {
+        lastSidebarMarkup = null;
         sidebarConvoList.innerHTML = `
             <div class="sidebar-state-empty">
-                <span>暂无历史会话</span>
+                <span>${query ? '没有匹配的会话' : '暂无历史会话'}</span>
             </div>
         `;
         return;
@@ -1285,11 +1242,12 @@ function renderSidebarConversations(chats) {
     });
 
     const renderCard = (chat) => {
+        const isActive = activeConversationId ? chat.id === activeConversationId : activeConversationKey.startsWith('new:') ? false : chat.isActive;
         const safeTitle = escapeHtml(chat.title);
         const safeWorkspace = escapeHtml(chat.workspace || '');
         const safeId = escapeHtml(chat.id || '');
         return `
-            <div class="sidebar-card ${chat.isActive ? 'active' : ''}" data-title="${safeTitle}" data-workspace="${safeWorkspace}" data-id="${safeId}">
+            <button type="button" class="sidebar-card ${isActive ? 'active' : ''}" aria-current="${isActive ? 'page' : 'false'}" data-title="${safeTitle}" data-workspace="${safeWorkspace}" data-id="${safeId}">
                 <div class="sidebar-card-icon">
                     <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -1299,11 +1257,12 @@ function renderSidebarConversations(chats) {
                     <span class="sidebar-card-title">${safeTitle}</span>
                     <div class="sidebar-card-meta">
                         ${chat.workspace ? `<span class="sidebar-card-workspace">📁 ${safeWorkspace}</span>` : ''}
-                        ${chat.isActive ? '<span class="sidebar-active-badge">当前</span>' : ''}
+                        ${isActive ? '<span class="sidebar-active-badge">当前</span>' : ''}
+                        <span class="sidebar-draft-badge" data-draft-for="${escapeHtml(conversationKey(chat))}" ${readSession(draftKey(conversationKey(chat))) ? '' : 'hidden'}>草稿</span>
                     </div>
                 </div>
                 ${chat.timestamp ? `<span class="sidebar-card-time">${escapeHtml(chat.timestamp)}</span>` : ''}
-            </div>
+            </button>
         `;
     };
 
@@ -1350,8 +1309,8 @@ function renderSidebarConversations(chats) {
 
         for (const [workspaceName, pChats] of projectChatsMap.entries()) {
             html += `
-                <div class="sidebar-project-group" data-project="${escapeHtml(workspaceName)}">
-                    <div class="sidebar-project-header">
+                <div class="sidebar-project-group ${!query && collapsedProjects.has(workspaceName) ? 'collapsed' : ''}" data-project="${escapeHtml(workspaceName)}">
+                    <button type="button" class="sidebar-project-header" aria-expanded="${query || !collapsedProjects.has(workspaceName) ? 'true' : 'false'}">
                         <div class="sidebar-project-title">
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -1366,7 +1325,7 @@ function renderSidebarConversations(chats) {
                                 </svg>
                             </div>
                         </div>
-                    </div>
+                    </button>
                     <div class="sidebar-project-items">
                         ${pChats.map(renderCard).join('')}
                     </div>
@@ -1397,42 +1356,27 @@ function renderSidebarConversations(chats) {
         `;
     }
 
+    if (lastSidebarMarkup === html) return;
+    const focused = sidebarConvoList.contains?.(document.activeElement) ? document.activeElement : null;
+    const focusId = focused?.getAttribute('data-id');
+    const focusTitle = focused?.getAttribute('data-title');
+    const focusProject = focused?.classList.contains('sidebar-project-header') ? focused.closest('.sidebar-project-group')?.getAttribute('data-project') : null;
+    const previousScroll = sidebarConvoList.scrollTop;
     sidebarConvoList.innerHTML = html;
+    lastSidebarMarkup = html;
+    sidebarConvoList.scrollTop = previousScroll;
+    if (focused) sidebarConvoList.querySelectorAll('button').forEach(button => {
+        if ((focusId !== null && button.getAttribute('data-id') === focusId && button.getAttribute('data-title') === focusTitle) ||
+            (focusProject && button.classList.contains('sidebar-project-header') && button.closest('.sidebar-project-group')?.getAttribute('data-project') === focusProject)) button.focus({ preventScroll: true });
+    });
 }
 
-// Sidebar Search Filter
-sidebarSearchInput.addEventListener('input', (e) => {
-    const query = e.target.value.trim().toLowerCase();
-    sidebarSearchClear.style.display = query ? 'block' : 'none';
-
-    const cards = sidebarConvoList.querySelectorAll('.sidebar-card');
-    cards.forEach(card => {
-        const title = (card.getAttribute('data-title') || '').toLowerCase();
-        const ws = (card.getAttribute('data-workspace') || '').toLowerCase();
-        const matches = title.includes(query) || ws.includes(query);
-        card.style.display = matches ? 'flex' : 'none';
-    });
-
-    // Check project groups
-    const projectGroups = sidebarConvoList.querySelectorAll('.sidebar-project-group');
-    projectGroups.forEach(group => {
-        const visible = group.querySelectorAll('.sidebar-card:not([style*="display: none"])').length;
-        group.style.display = visible > 0 ? 'block' : 'none';
-        if (query && visible > 0) group.classList.remove('collapsed');
-    });
-
-    // Check sections
-    const sections = sidebarConvoList.querySelectorAll('.sidebar-section');
-    sections.forEach(sec => {
-        const visible = sec.querySelectorAll('.sidebar-card:not([style*="display: none"])').length;
-        sec.style.display = visible > 0 ? 'block' : 'none';
-    });
-});
-
+// Filtering is reapplied from the source list, including after background refresh.
+sidebarSearchInput.addEventListener('input', () => renderSidebarConversations(rawConversations));
 sidebarSearchClear.addEventListener('click', () => {
     sidebarSearchInput.value = '';
-    sidebarSearchClear.style.display = 'none';
-    sidebarSearchInput.dispatchEvent(new Event('input'));
+    renderSidebarConversations(rawConversations);
+    sidebarSearchInput.focus();
 });
 
 // Sidebar Event Delegation
@@ -1440,7 +1384,13 @@ sidebarConvoList.addEventListener('click', async (e) => {
     const projectHeader = e.target.closest('.sidebar-project-header');
     if (projectHeader) {
         const group = projectHeader.closest('.sidebar-project-group');
-        if (group) group.classList.toggle('collapsed');
+        if (group) {
+            const name = group.getAttribute('data-project');
+            const collapsed = group.classList.toggle('collapsed');
+            if (collapsed) collapsedProjects.add(name); else collapsedProjects.delete(name);
+            projectHeader.setAttribute('aria-expanded', String(!collapsed));
+            saveSession('ag_collapsed_projects', JSON.stringify([...collapsedProjects].slice(-200)));
+        }
         return;
     }
 
@@ -1456,7 +1406,10 @@ sidebarConvoList.addEventListener('click', async (e) => {
 // --- Select / Switch Conversation ---
 async function selectChat(title, id = '') {
     if (!title && !id) return;
-    if (isSending) { showToast('消息正在提交，请稍后切换会话', 'info'); return; }
+    if (isSending || isNavigating) { showToast('上一项操作正在处理，请稍后切换会话', 'info'); return; }
+    isNavigating = true;
+    const previousTitle = headerSessionTitle.textContent;
+    updateComposerStatus();
 
     headerSessionTitle.textContent = title || '切换会话';
     chatContent.innerHTML = `
@@ -1475,39 +1428,59 @@ async function selectChat(title, id = '') {
         });
         const data = await res.json();
 
-        if (data.success) {
+        if (res.ok && data.success) {
+            expectedSelectionId = id || null;
+            activateConversation(id ? `id:${id}` : conversationKey({ title, workspace: '' }), id);
             setTimeout(loadSnapshot, 300);
             setTimeout(loadSnapshot, 800);
             setTimeout(loadSnapshot, 1600);
             setTimeout(loadSidebarHistory, 1200);
         } else {
+            headerSessionTitle.textContent = previousTitle;
+            showToast(data.message || '切换会话失败，草稿已保留', 'error');
             console.error('Failed to select chat:', data.error);
             loadSnapshot();
         }
     } catch (e) {
+        headerSessionTitle.textContent = previousTitle;
+        showToast('未确认会话切换，请同步后重试', 'error');
         console.error('Select chat error:', e);
         loadSnapshot();
+    } finally {
+        isNavigating = false;
+        updateComposerStatus();
+        fetchAppState();
     }
 }
 
 // --- Start New Chat ---
 async function startNewChat() {
-    if (isSending) { showToast('消息正在提交，请稍后新建会话', 'info'); return false; }
+    if (isSending || isNavigating) { showToast('上一项操作正在处理，请稍后新建会话', 'info'); return false; }
+    isNavigating = true;
+    navigationOriginId = activeConversationId;
+    updateComposerStatus();
     sidebarNewChatBtn.style.opacity = '0.5';
     closeMobileSidebar();
 
     try {
         const res = await fetchWithAuth('/new-chat', { method: 'POST' });
         const data = await res.json();
-        if (data.success) {
+        if (res.ok && data.success) {
+            expectedSelectionId = '';
+            activateConversation(`new:${window.crypto?.randomUUID?.() || Date.now()}`);
             headerSessionTitle.textContent = '新会话';
             setTimeout(loadSnapshot, 500);
             setTimeout(loadSnapshot, 1200);
             setTimeout(loadSidebarHistory, 1500);
+            return true;
         }
+        showToast(data.message || '新建会话失败，草稿已保留', 'error');
     } catch (e) {
+        showToast('新建会话失败，草稿已保留', 'error');
         console.error('New chat error:', e);
     } finally {
+        isNavigating = false;
+        updateComposerStatus();
         setTimeout(() => sidebarNewChatBtn.style.opacity = '1', 500);
     }
 }
@@ -1515,105 +1488,246 @@ async function startNewChat() {
 sidebarNewChatBtn.addEventListener('click', startNewChat);
 
 // --- Model Switcher Logic ---
-async function openModelModal() {
-    modelCardsGrid.innerHTML = `
-        <div class="loading-state" style="padding:20px;">
-            <div class="loading-spinner"></div>
-            <p>正在拉取可用模型列表...</p>
-        </div>
-    `;
-    modelModalOverlay.classList.add('show');
+const modelSearchInput = document.getElementById('modelSearchInput');
+const modelSelectionStatus = document.getElementById('modelSelectionStatus');
+let modelSelectionPending = false;
+let modelListLoading = false;
+let modelDialogOpener = null;
+let modelLoadVersion = 0;
 
+async function openModelModal() {
+    modelDialogOpener = document.activeElement;
+    modelSearchInput.value = '';
+    modelModalOverlay.classList.add('show');
+    document.getElementById('appShell').inert = true;
+    modelSearchInput.focus();
+    await loadModels();
+}
+
+async function loadModels() {
+    const version = ++modelLoadVersion;
+    modelListLoading = true;
+    modelSelectionStatus.textContent = '正在获取可用模型…';
+    modelCardsGrid.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>正在获取模型列表…</p></div>';
     try {
         const res = await fetchWithAuth('/models');
         const data = await res.json();
-        availableModels = data.models || [];
-
+        if (!res.ok || data.error) throw new Error('models unavailable');
+        if (version !== modelLoadVersion) return;
+        availableModels = (data.models || []).filter(model => model && typeof model.name === 'string');
+        modelListLoading = false;
         renderModelCards(availableModels);
     } catch (e) {
-        modelCardsGrid.innerHTML = `
-            <div style="padding:20px; text-align:center; color:var(--error);">
-                获取模型列表失败，请重试
-            </div>
-        `;
+        if (version !== modelLoadVersion) return;
+        modelSelectionStatus.textContent = '模型列表加载失败';
+        modelCardsGrid.innerHTML = '<div class="model-empty"><p>暂时无法获取模型列表</p><button class="modal-btn-cancel" id="retryModelsBtn" type="button">重试</button></div>';
+    } finally {
+        if (version === modelLoadVersion) modelListLoading = false;
     }
 }
 
-function renderModelCards(models) {
-    if (!models || models.length === 0) {
-        models = [
-            { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash High", displayName: "Gemini 3.8 Flash", family: "Google", badge: "默认 · 极速", desc: "极速长上下文与强逻辑推理，日常工程首选", contextWindow: "1,000,000" },
-            { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (High)", displayName: "Gemini 3.1 Pro", family: "Google", badge: "深度推理", desc: "复杂代码重构、跨模块系统分析与算法攻关", contextWindow: "2,000,000" },
-            { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6 (Thinking)", displayName: "Claude Sonnet 4.6", family: "Anthropic", badge: "深度思考", desc: "混合思考架构，复杂系统设计与精细代码修改", contextWindow: "200,000" },
-            { id: "claude-opus-4.6", name: "Claude Opus 4.6 (Thinking)", displayName: "Claude Opus 4.6", family: "Anthropic", badge: "顶级推演", desc: "顶级学术与极高复杂度推演", contextWindow: "200,000" },
-            { id: "gpt-oss-120b", name: "GPT-OSS 120B (Medium)", displayName: "GPT-OSS 120B", family: "Open-Source", badge: "开源前沿", desc: "开源旗舰权重与通用编程推理", contextWindow: "128,000" }
-        ];
-    }
-
-    const currentLower = currentModel.toLowerCase();
-
-    modelCardsGrid.innerHTML = models.map(m => {
-        const isCurrent = currentLower.includes(m.displayName.toLowerCase()) || 
-                          m.name.toLowerCase().includes(currentLower);
-
-        return `
-            <div class="model-select-card ${isCurrent ? 'active' : ''}" data-model-name="${escapeHtml(m.name)}">
-                <div class="model-card-icon">
-                    ${m.family === 'Anthropic' ? '💡' : m.family === 'Open-Source' ? '🔬' : '✨'}
-                </div>
-                <div class="model-card-info">
-                    <div class="model-card-header">
-                        <span class="model-card-name">${escapeHtml(m.displayName || m.name)}</span>
-                        ${m.badge ? `<span class="model-card-badge">${escapeHtml(m.badge)}</span>` : ''}
-                    </div>
-                    <div class="model-card-desc">${escapeHtml(m.desc || '')}</div>
-                    <div class="model-card-meta">
-                        <span>厂商: ${escapeHtml(m.family)}</span>
-                        ${m.contextWindow ? `<span>上下文: ${escapeHtml(m.contextWindow)} Tokens</span>` : ''}
-                    </div>
-                </div>
-                <div class="model-card-radio"></div>
-            </div>
-        `;
-    }).join('');
+function renderModelCards(models = availableModels) {
+    const terms = modelSearchInput.value.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+    const filtered = models.filter(m => terms.every(term => [m.name, m.displayName, m.family, m.desc, m.badge].join(' ').toLocaleLowerCase().includes(term)));
+    const exact = models.some(m => m.name.toLowerCase() === currentModel.toLowerCase());
+    modelCardsGrid.innerHTML = filtered.map(m => {
+        const isCurrent = exact ? m.name.toLowerCase() === currentModel.toLowerCase() :
+            (m.displayName || m.name).toLowerCase() === currentModel.toLowerCase();
+        return `<button type="button" class="model-select-card ${isCurrent ? 'active' : ''}" data-model-name="${escapeHtml(m.name)}" aria-pressed="${isCurrent}" ${modelSelectionPending ? 'disabled' : ''}>
+            <span class="model-card-icon" aria-hidden="true">${m.family === 'Anthropic' ? 'A' : m.family === 'Open-Source' ? 'O' : 'G'}</span>
+            <span class="model-card-info">
+                <span class="model-card-header"><span class="model-card-name">${escapeHtml(m.displayName || m.name)}</span>${isCurrent ? '<span class="model-current-badge">当前</span>' : ''}${m.badge ? `<span class="model-card-badge">${escapeHtml(m.badge)}</span>` : ''}</span>
+                <span class="model-card-desc">${escapeHtml(m.desc || '')}</span>
+                <span class="model-card-meta"><span>${escapeHtml(m.family || '')}</span>${m.contextWindow ? `<span>${escapeHtml(m.contextWindow)} 上下文</span>` : ''}</span>
+            </span><span class="model-card-radio" aria-hidden="true"></span>
+        </button>`;
+    }).join('') || '<div class="model-empty">' + (models.length ? '没有匹配的模型，试试其他名称或厂商' : '桌面端未返回可用模型') + '</div>';
+    if (!modelSelectionPending) modelSelectionStatus.textContent = `当前：${currentModel} · 显示 ${filtered.length} 个模型`;
 }
 
-modelCardsGrid.addEventListener('click', async (e) => {
-    const card = e.target.closest('.model-select-card');
-    if (!card) return;
-
-    const chosenModel = card.getAttribute('data-model-name');
-    modelText.textContent = chosenModel;
-    closeModelModal();
-
+async function selectModel(chosenModel) {
+    if (!chosenModel || modelSelectionPending || modelListLoading) return;
+    if (isSending || isNavigating) {
+        modelSelectionStatus.textContent = '请等待当前发送或会话切换完成后再选择模型';
+        return;
+    }
+    if (chosenModel === currentModel) { closeModelModal(); return; }
+    modelSelectionPending = true;
+    modelSearchInput.disabled = true;
+    cancelModelModalBtn.disabled = true;
+    closeModelModalBtn.disabled = true;
+    modelCardsGrid.setAttribute('aria-busy', 'true');
+    modelSelectionStatus.textContent = '正在切换，请稍候…';
+    renderModelCards();
     try {
         const res = await fetchWithAuth('/set-model', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: chosenModel })
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: chosenModel })
         });
         const data = await res.json();
-        if (data.success) {
-            currentModel = chosenModel;
-            modelText.textContent = chosenModel;
-        } else {
-            console.warn('Set model warning:', data.error);
-        }
+        if (!res.ok || !data.success) throw new Error(data.error || '桌面端未确认切换');
+        currentModel = chosenModel;
+        modelText.textContent = chosenModel;
+        modelSelectionPending = false;
+        closeModelModal();
+        showToast('模型已切换为 ' + chosenModel, 'success');
         setTimeout(fetchAppState, 800);
     } catch (e) {
-        console.error('Set model error:', e);
+        modelSelectionStatus.textContent = '切换未获确认，保留当前选择；可同步桌面后重试';
+        showToast('模型切换未获确认', 'error');
+    } finally {
+        modelSelectionPending = false;
+        modelSearchInput.disabled = false;
+        cancelModelModalBtn.disabled = false;
+        closeModelModalBtn.disabled = false;
+        modelCardsGrid.removeAttribute('aria-busy');
+        const status = modelSelectionStatus.textContent;
+        renderModelCards();
+        modelSelectionStatus.textContent = status;
+    }
+}
+
+modelCardsGrid.addEventListener('click', e => {
+    if (e.target.closest('#retryModelsBtn')) { loadModels(); return; }
+    const card = e.target.closest('.model-select-card');
+    if (card) selectModel(card.getAttribute('data-model-name'));
+});
+modelSearchInput.addEventListener('input', () => { if (!modelListLoading && !modelSelectionPending) renderModelCards(); });
+modelModalOverlay.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeModelModal(); return; }
+    if (e.key === 'Tab') {
+        const focusable = Array.from(modelModalOverlay.querySelectorAll('button:not(:disabled), input:not(:disabled)')).filter(el => el.offsetParent !== null);
+        if (!focusable.length) { e.preventDefault(); document.getElementById('modelModalCard').focus(); return; }
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
 });
 
 function closeModelModal() {
+    if (modelSelectionPending) return;
+    modelLoadVersion++;
+    modelListLoading = false;
     modelModalOverlay.classList.remove('show');
+    document.getElementById('appShell').inert = false;
+    (modelDialogOpener?.isConnected ? modelDialogOpener : modelBtn).focus();
 }
 
 modelBtn.addEventListener('click', openModelModal);
 closeModelModalBtn.addEventListener('click', closeModelModal);
 cancelModelModalBtn.addEventListener('click', closeModelModal);
-modelModalOverlay.addEventListener('click', (e) => {
-    if (e.target === modelModalOverlay) closeModelModal();
+modelModalOverlay.addEventListener('click', e => { if (e.target === modelModalOverlay) closeModelModal(); });
+
+// --- Workspace Command Palette ---
+let paletteIsOpen = false;
+let paletteItems = [];
+let paletteSelected = 0;
+let palettePreviousFocus = null;
+function fillComposer(text) {
+    if (isNavigating) return;
+    messageInput.value = messageInput.value.trim() ? `${messageInput.value}\n${text}` : text;
+    persistComposerDraft();
+    updateSendButtonState();
+    messageInput.focus();
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
+}
+function commandItems(query = '') {
+    const locked = isSending || isNavigating;
+    const actions = [
+        { id: 'new', label: '新会话', detail: '创建桌面对话', shortcut: 'Ctrl N', disabled: locked, run: startNewChat },
+        { id: 'focus', label: '专注输入', detail: '返回当前会话草稿', run: () => messageInput.focus() },
+        { id: 'model', label: '切换模型', detail: currentModel, disabled: locked, run: openModelModal },
+        { id: 'mode', label: '切换执行模式', detail: currentMode, disabled: locked, run: openModeModal },
+        { id: 'usage', label: '用量与配额', detail: '模型组额度与重置时间', run: openUsageModal },
+        { id: 'sync', label: '同步桌面', detail: '刷新对话和连接状态', run: syncDesktop },
+        { id: 'theme', label: '切换主题', detail: '跟随系统 / 浅色 / 深色', run: cycleTheme },
+        { id: 'summary', label: '总结进展', detail: '将提示添加到草稿', run: () => fillComposer('请总结当前进展、已变更的文件及下一步建议') },
+        { id: 'review', label: '检查代码与自测', detail: '将提示添加到草稿', run: () => fillComposer('请检查潜在边界问题、异常情况并进行自测验证') }
+    ].map(item => ({ ...item, kind: 'action', key: `action:${item.id}` }));
+    const chats = rawConversations.map(chat => ({
+        kind: 'chat', key: conversationKey(chat), label: chat.title || '未命名会话',
+        detail: chat.workspace || '独立会话', disabled: locked,
+        draft: !!readSession(draftKey(conversationKey(chat))),
+        current: chat.id ? chat.id === activeConversationId : chat.isActive,
+        run: () => { closeMobileSidebar(); selectChat(chat.title, chat.id || ''); }
+    }));
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matches = item => tokens.every(token => `${item.label} ${item.detail}`.toLowerCase().includes(token));
+    return query.trim() ? [...actions.filter(matches), ...chats.filter(matches)].slice(0, 50) : [...chats.slice(0, 6), ...actions];
+}
+function renderCommandResults(reset = false) {
+    const previousKey = !reset && paletteItems[paletteSelected]?.key;
+    paletteItems = commandItems(commandSearchInput.value);
+    paletteSelected = previousKey ? paletteItems.findIndex(item => item.key === previousKey && !item.disabled) : -1;
+    if (paletteSelected < 0) paletteSelected = paletteItems.findIndex(item => !item.disabled);
+    commandResults.innerHTML = paletteItems.length ? paletteItems.map((item, index) => `
+        ${index === 0 || item.kind !== paletteItems[index - 1].kind ? `<div class="command-group-label" role="presentation">${item.kind === 'chat' ? '会话' : '快捷操作'}</div>` : ''}
+        <button type="button" class="command-option" id="command-option-${index}" role="option" aria-selected="${index === paletteSelected}" aria-disabled="${!!item.disabled}" data-command-index="${index}" tabindex="-1">
+            <span class="command-option-icon" aria-hidden="true">${item.kind === 'chat' ? '↳' : '›'}</span>
+            <span class="command-option-copy"><span class="command-option-title">${escapeHtml(item.label)}</span><span class="command-option-detail">${escapeHtml(item.detail)}</span></span>
+            ${item.current ? '<span class="command-tag">当前</span>' : ''}${item.draft ? '<span class="command-tag">草稿</span>' : ''}
+            ${item.disabled ? '<span class="command-tag">处理中</span>' : item.shortcut ? `<kbd>${escapeHtml(item.shortcut)}</kbd>` : ''}
+        </button>`).join('') : '<div class="command-empty">没有找到匹配的会话或操作<span>试试项目名、会话标题或“模型”“用量”。</span></div>';
+    commandResultCount.textContent = paletteItems.length ? `显示 ${paletteItems.length} 项` : '无匹配结果';
+    updatePaletteSelection();
+}
+function updatePaletteSelection() {
+    commandResults.querySelectorAll('[data-command-index]').forEach((element, index) => element.setAttribute('aria-selected', String(index === paletteSelected)));
+    if (paletteSelected >= 0) {
+        commandSearchInput.setAttribute('aria-activedescendant', `command-option-${paletteSelected}`);
+        document.getElementById(`command-option-${paletteSelected}`)?.scrollIntoView?.({ block: 'nearest' });
+    } else commandSearchInput.removeAttribute('aria-activedescendant');
+}
+function openCommandPalette() {
+    if (paletteIsOpen) return;
+    if (document.querySelector('.modal-overlay.show')) return;
+    palettePreviousFocus = document.activeElement;
+    paletteIsOpen = true;
+    commandPalette.hidden = false;
+    document.getElementById('appShell').inert = true;
+    commandSearchInput.value = '';
+    commandSearchInput.setAttribute('aria-expanded', 'true');
+    renderCommandResults(true);
+    commandSearchInput.focus();
+}
+function closeCommandPalette(restoreFocus = true) {
+    paletteIsOpen = false;
+    commandPalette.hidden = true;
+    document.getElementById('appShell').inert = false;
+    commandSearchInput.setAttribute('aria-expanded', 'false');
+    commandSearchInput.removeAttribute('aria-activedescendant');
+    if (restoreFocus) (palettePreviousFocus?.isConnected ? palettePreviousFocus : messageInput)?.focus?.();
+}
+function runPaletteItem(index) {
+    const item = paletteItems[index];
+    if (!item || item.disabled) return;
+    closeCommandPalette();
+    Promise.resolve(item.run()).catch(() => showToast('操作未完成，请重试', 'error'));
+}
+function paletteKeydown(event) {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeCommandPalette(); }
+    else if (event.key === 'Enter') { event.preventDefault(); runPaletteItem(paletteSelected); }
+    else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        for (let step = 0; step < paletteItems.length; step++) {
+            paletteSelected = (paletteSelected + delta + paletteItems.length) % paletteItems.length;
+            if (!paletteItems[paletteSelected].disabled) break;
+        }
+        updatePaletteSelection();
+    } else if (event.key === 'Tab') {
+        event.preventDefault();
+        (document.activeElement === commandSearchInput ? document.getElementById('closeCommandPaletteBtn') : commandSearchInput).focus();
+    }
+}
+['commandPaletteBtn', 'headerCommandBtn', 'composerCommandBtn'].forEach(id => document.getElementById(id)?.addEventListener('click', openCommandPalette));
+document.getElementById('closeCommandPaletteBtn').addEventListener('click', () => closeCommandPalette());
+commandPalette.addEventListener('click', event => { if (event.target === commandPalette) closeCommandPalette(); });
+commandSearchInput.addEventListener('input', () => renderCommandResults(true));
+commandResults.addEventListener('click', event => {
+    const option = event.target.closest('[data-command-index]');
+    if (option) runPaletteItem(Number(option.getAttribute('data-command-index')));
 });
 
 // --- Usage & Quota Viewer Logic ---
@@ -1626,6 +1740,7 @@ let quotaClockOffsetMs = 0;
 async function openUsageModal() {
     usageModalBody.innerHTML = '<div class="usage-loading"><div class="loading-spinner"></div><p>正在读取账户模型组配额...</p></div>';
     usageModalOverlay.classList.add('show');
+    closeUsageModalBtn.focus();
     fetchUsageData();
 }
 
@@ -1786,6 +1901,7 @@ function openModeModal() {
         </div>
     `).join('');
     modeModalOverlay.classList.add('show');
+    closeModeModalBtn.focus();
 }
 
 function getModeDescription(mode) {
@@ -1830,21 +1946,23 @@ modeModalOverlay.addEventListener('click', (e) => {
 
 // --- Sending Messages ---
 async function sendMessage(overrideText = null) {
-    if (isSending) return;
+    if (isSending || isNavigating) return;
     const rawText = overrideText !== null ? overrideText : messageInput.value;
     const message = rawText ? rawText.trim() : '';
     if (!message) return;
-    if (navigator.onLine === false) { showToast('网络离线，消息草稿已保留', 'error'); return; }
+    if (navigator.onLine === false) { persistComposerDraft(); deliveryState = 'failed'; updateComposerStatus(); showToast('网络离线，消息草稿已保留', 'error'); return; }
     const sameRequest = pendingSend?.message === message;
     if (!sameRequest) {
         pendingSend = {
             requestId: window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
-            message, isSteer: isAgentBusy
+            message, isSteer: isAgentBusy, ...(activeConversationId || activeConversationKey.startsWith('new:') ? { conversationId: activeConversationId } : {})
         };
     }
-    saveSession('ag_pending_send', JSON.stringify(pendingSend));
-    if (overrideText === null) saveSession('ag_message_draft', rawText);
+    savePending();
+    if (overrideText === null) persistComposerDraft();
     isSending = true;
+    deliveryState = 'sending';
+    updateComposerStatus();
     sendBtn.disabled = true;
     sendBtn.style.opacity = '0.5';
     try {
@@ -1866,28 +1984,31 @@ async function sendMessage(overrideText = null) {
         if (!res.ok || data?.success !== true || data?.ok !== true) {
             if (!data?.uncertain) {
                 pendingSend = null;
-                saveSession('ag_pending_send', null);
+                savePending();
             }
             if (overrideText !== null && !messageInput.value) {
                 messageInput.value = message;
-                saveSession('ag_message_draft', message);
+                saveSession(draftKey(activeConversationKey), message);
             }
+            deliveryState = data?.uncertain ? 'uncertain' : 'failed';
             showToast(data?.message || '消息发送失败，草稿已保留', 'error');
             return;
         }
         pendingSend = null;
-        saveSession('ag_pending_send', null);
+        savePending();
         // Keep any edits typed while this request was in progress.
         if (overrideText === null && messageInput.value === rawText) {
             messageInput.value = '';
             messageInput.style.height = 'auto';
-            saveSession('ag_message_draft', null);
+            saveSession(draftKey(activeConversationKey), null);
             updateSendButtonState();
         }
+        deliveryState = messageInput.value.trim() ? 'draft' : 'sent';
         showToast(data.isSteer ? '⚡ 插话已提交' : '消息已发送', 'success', 1800);
         setTimeout(loadSnapshot, 300);
         setTimeout(loadSidebarHistory, 1500);
     } catch (error) {
+        deliveryState = 'uncertain';
         console.error('Send message error:', error);
         if (overrideText !== null && !messageInput.value) messageInput.value = message;
         showToast(authRedirecting ? '登录已过期，草稿已保留' : '未收到发送结果，草稿已保留；重试会核对原请求', 'error');
@@ -1896,6 +2017,7 @@ async function sendMessage(overrideText = null) {
         sendBtn.disabled = false;
         sendBtn.style.opacity = '1';
         updateSendButtonState();
+        updateComposerStatus();
     }
 }
 
@@ -1913,7 +2035,7 @@ sendBtn.addEventListener('touchend', (e) => {
 
 // Keyboard handling: Enter sends; Shift+Enter creates new line (with IME composition guard)
 messageInput.addEventListener('keydown', (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
+    if (paletteIsOpen || document.querySelector('.modal-overlay.show') || e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
@@ -1922,7 +2044,7 @@ messageInput.addEventListener('keydown', (e) => {
 
 // Auto-grow textarea and update Codex send button state
 messageInput.addEventListener('input', function () {
-    saveSession('ag_message_draft', this.value);
+    persistComposerDraft();
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 180) + 'px';
     updateSendButtonState();
@@ -1930,6 +2052,22 @@ messageInput.addEventListener('input', function () {
 
 // Global Keyboard Shortcuts
 window.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (document.querySelector('.modal-overlay.show')) return;
+        if (paletteIsOpen) closeCommandPalette(); else openCommandPalette();
+        return;
+    }
+    if (paletteIsOpen) { paletteKeydown(e); return; }
+    if (document.querySelector('.modal-overlay.show')) {
+        if (e.key === 'Escape') {
+            if (usageModalOverlay.classList.contains('show')) closeUsageModal();
+            else if (modelModalOverlay.classList.contains('show')) closeModelModal();
+            else if (modeModalOverlay.classList.contains('show')) closeModeModal();
+        }
+        return;
+    }
     // Ctrl+B / Cmd+B toggles sidebar
     if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
         e.preventDefault();
@@ -1993,17 +2131,20 @@ if (chatContent) {
 }
 
 // Virtual Keyboard compensation for mobile
+function syncViewportHeight() {
+    if (isDesktop()) {
+        document.body.style.height = '';
+        return;
+    }
+    if (!window.visualViewport || window.visualViewport.scale > 1) return;
+    document.body.style.height = window.visualViewport.height + 'px';
+    if (document.activeElement === messageInput) {
+        setTimeout(() => { chatContainer.scrollTop = chatContainer.scrollHeight; }, 100);
+    }
+}
 if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => {
-        if (!isDesktop()) {
-            document.body.style.height = window.visualViewport.height + 'px';
-            if (document.activeElement === messageInput) {
-                setTimeout(() => {
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
-                }, 100);
-            }
-        }
-    });
+    window.visualViewport.addEventListener('resize', syncViewportHeight);
+    window.addEventListener('resize', syncViewportHeight);
 }
 
 // --- Quick Actions & Conversation Guidance ---
@@ -2026,6 +2167,7 @@ function setupGuidanceChips() {
                 } else {
                     messageInput.value = text;
                 }
+                persistComposerDraft();
                 messageInput.focus();
                 messageInput.style.height = 'auto';
                 messageInput.style.height = Math.min(messageInput.scrollHeight, 180) + 'px';
@@ -2053,25 +2195,57 @@ stopBtn.addEventListener('click', async () => {
     setTimeout(() => stopBtn.style.opacity = '1', 500);
 });
 
-refreshBtn.addEventListener('click', () => {
+function syncDesktop() {
+    if (!isSending && !isNavigating) expectedSelectionId = null;
     loadSnapshot(true);
     fetchAppState();
     loadSidebarHistory();
-});
-
-sidebarSyncBtn.addEventListener('click', () => {
-    loadSnapshot(true);
-    fetchAppState();
-    loadSidebarHistory();
-});
+}
+refreshBtn.addEventListener('click', syncDesktop);
+sidebarSyncBtn.addEventListener('click', syncDesktop);
 
 // --- Remote Click Handling (Thinking blocks, Run/Allow buttons) ---
+let reviewTogglePending = false;
+async function toggleReviewFiles(header) {
+    if (!header || reviewTogglePending) return;
+    const index = Array.from(chatContent.querySelectorAll('.files-changed-header')).indexOf(header);
+    if (index < 0) return;
+    reviewTogglePending = true;
+    header.setAttribute('aria-busy', 'true');
+    try {
+        const res = await fetchWithAuth('/remote-click', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ selector: '.files-changed-header', index })
+        });
+        const result = await res.json();
+        if (!res.ok || result.error || result.success === false) throw new Error('review unavailable');
+        setTimeout(loadSnapshot, 250);
+        setTimeout(loadSnapshot, 800);
+    } catch (e) {
+        showToast('文件变更未能展开，请同步桌面后重试', 'error');
+    } finally {
+        reviewTogglePending = false;
+        header.removeAttribute('aria-busy');
+    }
+}
+chatContainer.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229 || !e.target.matches('.ag-review-summary')) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleReviewFiles(e.target.closest('.files-changed-header')); }
+});
 chatContainer.addEventListener('click', async (e) => {
-    const target = e.target.closest('div, span, p, summary, button, details');
+    if (e.target.closest('.codex-copy-btn')) return;
+    const nativeSummary = e.target.closest('details > summary');
+    if (nativeSummary) {
+        nativeSummary.parentElement.dataset.clientDetailsConversation = activeConversationKey;
+        return;
+    }
+    const reviewHeader = e.target.closest('.files-changed-header');
+    if (reviewHeader && !e.target.closest('button, a')) { await toggleReviewFiles(reviewHeader); return; }
+    const target = e.target.closest('.ag-snapshot-toggle, .ag-snapshot-action, button, [role="button"]');
     if (!target) return;
 
     const text = target.innerText || '';
-    const isUiToggle = /Thought|Thinking|Worked for|Edited|\d+\s+file/i.test(text) && text.length < 500;
+    const isUiToggle = target.classList.contains('ag-snapshot-toggle') && text.length < 500;
 
     if (isUiToggle) {
         target.style.opacity = '0.5';
@@ -2152,6 +2326,8 @@ if (closeSupportBtn) {
 // --- Init Application ---
 initTheme();
 initSidebarState();
+updateComposerStatus();
+updateSendButtonState();
 connectWebSocket();
 fetchAppState();
 loadSidebarHistory();

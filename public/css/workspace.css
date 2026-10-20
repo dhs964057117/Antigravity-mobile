@@ -1,0 +1,84 @@
+/* Workspace navigation uses the shared light and dark theme tokens. */
+:root { color-scheme: dark; --model-badge-text: var(--accent-light); }
+[data-theme="light"] { color-scheme: light; --model-badge-text: var(--accent-hover); }
+.model-card-badge { color: var(--model-badge-text); }
+.model-search-row { padding: 14px 20px 0; }
+.model-search-row input { width: 100%; border: 1px solid var(--border-active); background: var(--bg-input); color: var(--text-main); border-radius: 9px; padding: 10px 12px; font: inherit; font-size: 14px; }
+.model-search-row input::placeholder { color: var(--text-muted); }
+#modelModalCard { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); }
+#modelCardsGrid { min-height: 100px; flex: 1; max-height: 60vh; }
+#modelModalCard .modal-card-header, #modelModalCard .modal-card-footer, .model-search-row { flex-shrink: 0; }
+.model-current-badge { color: var(--text-secondary); background: var(--surface-badge); font-size: 10px; padding: 2px 6px; border-radius: 5px; }
+.model-select-card:disabled { cursor: wait; opacity: .6; }
+.model-select-card:focus-visible { outline-offset: 2px; }
+.model-select-card.active:hover { background: var(--accent-glow); border-color: var(--accent); }
+.model-empty { padding: 28px 10px; color: var(--text-secondary); text-align: center; font-size: 13px; }
+.model-empty p { margin-bottom: 12px; }
+.modal-close-icon:hover, .modal-btn-cancel:hover, .modal-btn-secondary { background: var(--surface-hover); }
+#modelSelectionStatus { font-size: 11px; line-height: 1.6; color: var(--text-secondary); overflow-wrap: anywhere; }
+.workspace-search-trigger { display: flex; align-items: center; gap: 9px; margin: 0 12px 12px; padding: 10px 11px; text-align: left; color: var(--text-muted); border: 1px solid var(--border); background: var(--surface-group); border-radius: var(--radius-md); cursor: pointer; font: inherit; font-size: 12px; }
+.workspace-search-trigger span { flex: 1; }
+kbd { font-family: inherit; font-size: 10px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 2px 5px; white-space: nowrap; }
+.workspace-search-trigger:hover, .composer-command-btn:hover { color: var(--text-main); background: var(--surface-hover); }
+.sidebar-card { width: 100%; border: 0; text-align: left; font: inherit; color: var(--text-main); background: transparent; }
+.sidebar-project-header { width: 100%; border: 0; text-align: left; font: inherit; color: var(--text-secondary); background: transparent; }
+.sidebar-draft-badge { font-size: 10px; color: var(--warning); }
+.composer-feedback { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 11px; color: var(--text-muted); padding: 4px 4px 0; }
+.composer-feedback [data-state="sent"] { color: var(--success); }
+.composer-feedback [data-state="failed"], .composer-feedback [data-state="uncertain"] { color: var(--warning); }
+.composer-feedback [data-state="sending"], .composer-feedback [data-state="navigating"] { color: var(--text-secondary); }
+.composer-command-btn { display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; padding: 6px; font: inherit; white-space: nowrap; border-radius: 5px; }
+.command-mobile-btn { display: none; }
+.command-overlay { position: fixed; inset: 0; z-index: 2500; display: flex; justify-content: center; align-items: flex-start; padding: min(14vh, 110px) 20px 24px; background: rgba(0,0,0,.48); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.command-dialog { width: min(620px, 100%); max-height: min(680px, 76dvh); display: flex; flex-direction: column; background: var(--bg-panel); border: 1px solid var(--border-active); border-radius: 16px; box-shadow: 0 24px 90px rgba(0,0,0,.30); overflow: hidden; }
+.command-search-row { display: flex; align-items: center; gap: 12px; padding: 17px 18px; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+.command-search-row input { flex: 1; min-width: 0; background: transparent; border: 0; color: var(--text-main); font: inherit; font-size: 15px; outline: none; }
+.command-search-row input::placeholder { color: var(--text-muted); }
+.command-close { color: var(--text-muted); font: inherit; font-size: 11px; padding: 4px 7px; background: var(--surface-hover); border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.command-results { min-height: 80px; overflow-y: auto; padding: 6px; overscroll-behavior: contain; }
+.command-group-label { padding: 10px 12px 6px; color: var(--text-muted); font-size: 11px; }
+.command-option { display: flex; align-items: center; gap: 12px; width: 100%; padding: 11px 12px; border: 0; border-radius: 9px; background: transparent; color: var(--text-main); text-align: left; font: inherit; cursor: pointer; }
+.command-option[aria-selected="true"] { background: var(--surface-active); }
+.command-option:hover { background: var(--surface-hover); }
+.command-option[aria-disabled="true"] { opacity: .5; cursor: default; }
+.command-option-copy { display: flex; flex-direction: column; min-width: 0; gap: 3px; flex: 1; }
+.command-option-title { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-option-detail { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-option-icon { color: var(--text-muted); font-size: 21px; width: 18px; text-align: center; flex-shrink: 0; }
+.command-tag { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.command-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--border); padding: 11px 16px; color: var(--text-muted); font-size: 10px; }
+.command-footer kbd { margin: 0 3px; }
+.command-empty { padding: 36px 18px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+.command-empty span { display: block; color: var(--text-muted); margin-top: 8px; font-size: 11px; }
+@media (max-width: 767px) {
+    .model-search-row input { font-size: 16px; }
+    .app-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 44px 20px; column-gap: 6px; row-gap: 2px; height: 80px; padding: 6px 12px; }
+    .header-left { min-width: 0; gap: 4px; }
+    .header-left .model-pill { min-width: 0; max-width: 110px; padding: 7px 8px; }
+    .header-left .model-pill span { min-width: 0; max-width: 78px; }
+    .header-right { min-width: 0; gap: 4px; }
+    .header-right .mode-pill, .header-right .refresh-btn { display: none; }
+    .header-right .icon-btn, .header-right .usage-pill, .header-right .stop-btn, .header-left .sidebar-toggle-btn { flex-shrink: 0; width: 44px; min-width: 44px; height: 44px; padding: 10px; justify-content: center; }
+    .header-center { position: static; transform: none; left: auto; grid-column: 1 / -1; grid-row: 2; min-width: 0; width: 100%; pointer-events: auto; }
+    .header-center .session-info { display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; width: 100%; min-width: 0; }
+    .header-center .session-title { min-width: 0; max-width: none; flex: 1; font-size: 11px; text-align: left; }
+    .header-center .session-meta { display: flex; flex-shrink: 0; font-size: 10px; }
+    .header-center .stats-text, .header-center .meta-separator { display: none; }
+    .command-mobile-btn { display: flex; }
+    .command-overlay { padding: 12px; padding-top: max(12px, env(safe-area-inset-top)); align-items: flex-start; }
+    .command-dialog { max-height: calc(100dvh - 24px - env(safe-area-inset-top)); border-radius: 13px; }
+    .command-search-row { padding: 15px 12px; gap: 8px; }
+    .command-search-row input { font-size: 16px; }
+    .command-option { min-height: 52px; }
+    .composer-feedback { font-size: 10px; gap: 6px; }
+    .composer-command-btn { min-height: 36px; }
+    .composer-command-btn kbd { display: none; }
+}
+@media (max-width: 360px) {
+    .header-right .theme-toggle-btn { display: none; }
+    .header-left .model-pill { max-width: 92px; }
+    .header-left .model-pill span { max-width: 62px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

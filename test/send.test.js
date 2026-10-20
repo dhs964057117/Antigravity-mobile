@@ -57,12 +57,13 @@ test('receipt cache is bounded and expires completed results', async () => {
 // Evaluate the real injected scripts against a small desktop DOM model.
 function desktop({ initialText = '', loseEditorOnSubmit = false, disconnectOnSubmit = false,
     partialInsert = false, delayedClear = 0, buttonMissing = false, buttonDisabled = false,
-    ariaDisabled = false, neverClear = false } = {}) {
+    ariaDisabled = false, neverClear = false, pathname = '/c/one', navigateAfterInsert = false, navigateOnSubmit = false } = {}) {
     let clicks = 0;
     let enters = 0;
     let inserts = 0;
     const keyEvents = [];
     let lost = false;
+    const location = { pathname };
     const target = {
         innerText: initialText, isConnected: true, offsetParent: {}, parentElement: null,
         getClientRects: () => [{}], getBoundingClientRect: () => ({ left: 1, top: 1, width: 20, height: 20 }),
@@ -71,6 +72,7 @@ function desktop({ initialText = '', loseEditorOnSubmit = false, disconnectOnSub
         closest: () => container
     };
     const submit = () => {
+        if (navigateOnSubmit) location.pathname = '/c/created';
         if (loseEditorOnSubmit) lost = true;
         else if (!neverClear) {
             if (delayedClear) setTimeout(() => { target.innerText = ''; }, delayedClear);
@@ -91,7 +93,7 @@ function desktop({ initialText = '', loseEditorOnSubmit = false, disconnectOnSub
         querySelector: selector => selector.includes('data-ag-active-target') ? (lost ? null : target) : null,
         createRange: () => ({ selectNodeContents() {} })
     };
-    const context = vm.createContext({ document, window: { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) } });
+    const context = vm.createContext({ document, window: { location, getSelection: () => ({ removeAllRanges() {}, addRange() {} }) } });
     const cdp = {
         contexts: [{ id: 1 }],
         async call(method, params) {
@@ -102,6 +104,7 @@ function desktop({ initialText = '', loseEditorOnSubmit = false, disconnectOnSub
             if (method === 'Input.insertText') {
                 inserts++;
                 target.innerText = partialInsert ? params.text.slice(0, 21) : params.text;
+                if (navigateAfterInsert) location.pathname = '/c/other';
             }
             if (method === 'Input.dispatchKeyEvent') {
                 keyEvents.push(params.type);
@@ -119,6 +122,30 @@ test('successful and slow submissions click exactly once', async () => {
     assert.equal(result.ok, true);
     assert.equal(fixture.clicks(), 1);
     assert.equal(fixture.enters(), 0);
+});
+
+test('expected conversation ID prevents sending to a different desktop conversation', async () => {
+    const fixture = desktop();
+    const rejected = await injectMessage(fixture.cdp, 'hello', { conversationId: 'other' });
+    assert.equal(rejected.error, 'conversation_changed');
+    assert.equal(fixture.inserts(), 0);
+    assert.equal(fixture.clicks(), 0);
+    assert.equal((await injectMessage(fixture.cdp, 'hello', { conversationId: 'one' })).ok, true);
+});
+
+test('a conversation changed during insertion cannot receive a submit', async () => {
+    const fixture = desktop({ navigateAfterInsert: true });
+    const result = await injectMessage(fixture.cdp, 'hello', { conversationId: 'one' });
+    assert.equal(result.ok, false);
+    assert.equal(fixture.clicks(), 0);
+    assert.equal(fixture.enters(), 0);
+});
+
+test('a new-chat draft only sends from the landing page and accepts the newly created route', async () => {
+    const wrongPage = desktop();
+    assert.equal((await injectMessage(wrongPage.cdp, 'hello', { conversationId: '' })).error, 'conversation_changed');
+    const landing = desktop({ pathname: '/', navigateOnSubmit: true });
+    assert.equal((await injectMessage(landing.cdp, 'hello', { conversationId: '' })).ok, true);
 });
 
 test('missing editor and disconnected readback cannot report success', async () => {

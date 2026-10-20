@@ -37,6 +37,7 @@ test('HTTP and websocket endpoints remain responsive while desktop is disconnect
     assert.deepEqual(usage.quota.groups, []);
     assert.equal(usage.quota.nextDailyResetUtc, undefined);
     assert.ok(Number.isFinite(Date.parse(usage.serverTime)));
+    assert.equal((await request('/send', JSON.stringify({ message: 'hello', conversationId: 42 }))).status, 400);
     for (const message of [null, 42, {}, '', '   ']) {
         assert.equal((await request('/send', JSON.stringify({ message }))).status, 400);
     }

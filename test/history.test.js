@@ -1,7 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { getChatHistory, loadOlderMessages } from '../server.js';
+import { getChatHistory, loadOlderMessages, getAppState } from '../server.js';
+
+test('desktop app state reports the real conversation ID without parsing errors', async () => {
+    const context = vm.createContext({
+        window: { location: { pathname: '/c/current-chat' } },
+        document: { querySelector: () => null, querySelectorAll: () => [] }
+    });
+    const state = await getAppState({ contexts: [{ id: 1 }], async call(method, params) {
+        return { result: { value: await vm.runInContext(params.expression, context) } };
+    } });
+    assert.equal(state.conversationId, 'current-chat');
+});
 
 test('history polling reads sidebar rows without opening search or dispatching Escape', async () => {
     let interactions = 0;
