@@ -5,7 +5,8 @@
     "description": "Antigravity-mobile: Enhanced real-time mobile monitor and remote control for Antigravity AI sessions with Antigravity 2.0 support",
     "scripts": {
         "start": "node server.js",
-        "dev": "node server.js"
+        "dev": "node server.js",
+        "test": "node --test"
     },
     "dependencies": {
         "compression": "^1.8.1",

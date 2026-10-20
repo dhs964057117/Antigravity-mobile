@@ -13,6 +13,9 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { inspectUI } from './ui_inspector.js';
 import { execSync } from 'child_process';
+import { connectCDP, getJson } from './core/cdp.js';
+import { createSendCoordinator } from './core/send-coordinator.js';
+import { createQuotaReader } from './core/quota.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -105,20 +108,6 @@ function getLocalIP() {
     return candidates.length > 0 ? candidates[0].address : 'localhost';
 }
 
-// Helper: HTTP GET JSON
-function getJson(url) {
-    return new Promise((resolve, reject) => {
-        http.get(url, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-            });
-        }).on('error', reject);
-    });
-}
-
-// Find Antigravity CDP endpoint
 // Find Antigravity CDP endpoint
 async function discoverCDP() {
     const errors = [];
@@ -160,68 +149,6 @@ async function discoverCDP() {
     throw new Error(`CDP not found. ${errorSummary}`);
 }
 
-// Connect to CDP
-async function connectCDP(url) {
-    const ws = new WebSocket(url);
-    await new Promise((resolve, reject) => {
-        ws.on('open', resolve);
-        ws.on('error', reject);
-    });
-
-    let idCounter = 1;
-    const pendingCalls = new Map(); // Track pending calls by ID
-    const contexts = [];
-    const CDP_CALL_TIMEOUT = 30000; // 30 seconds timeout
-
-    // Single centralized message handler (fixes MaxListenersExceeded warning)
-    ws.on('message', (msg) => {
-        try {
-            const data = JSON.parse(msg);
-
-            // Handle CDP method responses
-            if (data.id !== undefined && pendingCalls.has(data.id)) {
-                const { resolve, reject, timeoutId } = pendingCalls.get(data.id);
-                clearTimeout(timeoutId);
-                pendingCalls.delete(data.id);
-
-                if (data.error) reject(data.error);
-                else resolve(data.result);
-            }
-
-            // Handle execution context events
-            if (data.method === 'Runtime.executionContextCreated') {
-                contexts.push(data.params.context);
-            } else if (data.method === 'Runtime.executionContextDestroyed') {
-                const id = data.params.executionContextId;
-                const idx = contexts.findIndex(c => c.id === id);
-                if (idx !== -1) contexts.splice(idx, 1);
-            } else if (data.method === 'Runtime.executionContextsCleared') {
-                contexts.length = 0;
-            }
-        } catch (e) { }
-    });
-
-    const call = (method, params) => new Promise((resolve, reject) => {
-        const id = idCounter++;
-
-        // Setup timeout to prevent memory leaks from never-resolved calls
-        const timeoutId = setTimeout(() => {
-            if (pendingCalls.has(id)) {
-                pendingCalls.delete(id);
-                reject(new Error(`CDP call ${method} timed out after ${CDP_CALL_TIMEOUT}ms`));
-            }
-        }, CDP_CALL_TIMEOUT);
-
-        pendingCalls.set(id, { resolve, reject, timeoutId });
-        ws.send(JSON.stringify({ id, method, params }));
-    });
-
-    await call("Runtime.enable", {});
-    await new Promise(r => setTimeout(r, 1000));
-
-    return { ws, call, contexts };
-}
-
 // Capture chat snapshot
 async function captureSnapshot(cdp) {
     const CAPTURE_SCRIPT = `(async () => {
@@ -257,6 +184,9 @@ async function captureSnapshot(cdp) {
             try {
                 const pos = window.getComputedStyle(el).position;
                 if (pos === 'fixed' || pos === 'absolute') {
+                    if (el.tagName === 'BUTTON' && (el.getAttribute('aria-label') || '').includes('Load older messages')) {
+                        return;
+                    }
                     el.setAttribute('data-ag-rem', 'true');
                 }
             } catch(e) {}
@@ -273,6 +203,12 @@ async function captureSnapshot(cdp) {
         clone.style.overflow = 'visible';
         clone.style.containerType = 'normal';
         clone.style.paddingRight = '0px';
+
+        const clonedOlderBtn = clone.querySelector('button[aria-label*="Load older messages"]');
+        if (clonedOlderBtn) {
+            clonedOlderBtn.classList.add('ag-load-older-btn');
+            clonedOlderBtn.classList.remove('sr-only', 'opacity-0');
+        }
 
         // Fix container-type: size and max-width on children to prevent collapsing
         clone.querySelectorAll('*').forEach(el => {
@@ -481,6 +417,19 @@ async function captureSnapshot(cdp) {
         const cancelBtn = document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
         const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
 
+        const olderBtn = cascade.querySelector('button[aria-label*="Load older messages"]');
+        let historyMeta = null;
+        if (olderBtn) {
+            const label = olderBtn.getAttribute('aria-label') || '';
+            const match = label.match(/showing\\s+(\\d+)\\s+of\\s+(\\d+)/i);
+            historyMeta = {
+                hasOlder: true,
+                label: label,
+                showing: match ? parseInt(match[1], 10) : null,
+                total: match ? parseInt(match[2], 10) : null
+            };
+        }
+
         return {
             html: html,
             css: allCSS,
@@ -489,6 +438,7 @@ async function captureSnapshot(cdp) {
             fontFamily: cascadeStyles.fontFamily,
             scrollInfo: scrollInfo,
             isBusy: isBusy,
+            history: historyMeta,
             stats: {
                 nodes: clone.getElementsByTagName('*').length,
                 htmlSize: html.length,
@@ -531,379 +481,227 @@ async function captureSnapshot(cdp) {
 }
 
 // Inject message into Antigravity (Supports regular send and Steer/Interjection 插话引导)
-async function injectMessage(cdp, text, options = {}) {
-    if (!text || typeof text !== 'string') {
-        return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
-    }
-
-    const forceSteer = options.isSteer === true;
-    console.log(`[SEND] Processing message (chars: ${text.length}, forceSteer=${forceSteer})...`);
-
-    // Step 1: Detect chat execution state (is the agent actively generating/running?)
-    const BUSY_CHECK = `(() => {
-        // Clear previous target markers
-        document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
-
-        const inputArea = document.getElementById('antigravity.agentSidePanelInputBox') || 
-                          document.querySelector('#antigravity\\\\.agentSidePanelInputBox');
-        
-        // The chat's active generation button is Cancel (Ctrl+D) inside the input box
-        const cancelBtn = inputArea ? 
-            inputArea.querySelector('button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]') :
-            document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"]');
-
-        const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
-        return { busy: isBusy };
-    })()`;
-
-    let isAgentBusy = false;
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: BUSY_CHECK,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.busy) {
-                isAgentBusy = true;
-                break;
-            }
-        } catch (e) { }
-    }
-
-    const isSteerMode = isAgentBusy || forceSteer;
-    if (isSteerMode) {
-        console.log('[SEND] Agent is actively running. Processing message as STEER / INTERJECTION (插话引导)...');
-    }
-
-    // Step 2: Locate target editor inside Antigravity
-    const LOCATE_EXP = `(async () => {
-        document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
-
-        const cascade = document.getElementById('conversation') || 
-                        document.getElementById('chat') || 
-                        document.getElementById('cascade') ||
-                        document.querySelector('.isolate.overflow-y-auto') ||
-                        document.querySelector('[class*="scrollbar-hide"][class*="overflow-y-auto"]');
-
-        const allEditors = Array.from(document.querySelectorAll('[data-lexical-editor="true"], [contenteditable="true"]'))
-            .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
-
-        if (allEditors.length === 0) {
-            return { ok: false, error: "editor_not_found", message: "未找到输入框，请确认 Antigravity 界面正常打开" };
-        }
-
-        let target = null;
-        if (cascade) {
-            let curr = cascade;
-            while (curr && curr !== document.body) {
-                target = allEditors.find(ed => curr.contains(ed));
-                if (target) break;
-                curr = curr.parentElement;
-            }
-        }
-        if (!target) {
-            target = allEditors.find(ed => {
-                const box = ed.closest('[id*="agentSidePanelInputBox"]') || ed.parentElement;
-                return box && box.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
-            }) || allEditors[0];
-        }
-
-        target.setAttribute('data-ag-active-target', 'true');
-        if (target.focus) target.focus();
-
-        const rect = target.getBoundingClientRect();
-        return {
-            ok: true,
-            isLexical: target.getAttribute('data-lexical-editor') === 'true',
-            pos: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
-        };
-    })()`;
-
-    let locateResult = null;
-    let targetContext = null;
-
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: LOCATE_EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value?.ok) {
-                locateResult = res.result.value;
-                targetContext = ctx;
-                break;
-            }
-        } catch (e) { }
-    }
-
-    if (!locateResult || !targetContext) {
-        console.error('[SEND] Editor not found in any context');
-        return { ok: false, error: "editor_not_found", message: "未找到桌面端输入框" };
-    }
-
-    // Step 3: Focus the editor via CDP mouse click, then verify and reinforce document.activeElement
-    if (locateResult.pos && locateResult.pos.x > 0 && locateResult.pos.y > 0) {
-        try {
-            await cdp.call('Input.dispatchMouseEvent', {
-                type: 'mousePressed',
-                x: locateResult.pos.x,
-                y: locateResult.pos.y,
-                button: 'left',
-                clickCount: 1
-            });
-            await cdp.call('Input.dispatchMouseEvent', {
-                type: 'mouseReleased',
-                x: locateResult.pos.x,
-                y: locateResult.pos.y,
-                button: 'left',
-                clickCount: 1
-            });
-        } catch (e) {
-            console.error('[SEND] CDP mouse click focus error:', e);
-        }
-    }
-
-    // Verify document.activeElement and enforce focus if needed
+export async function injectMessage(cdp, text, options = {}) {
+    let submissionStarted = false;
     try {
-        await cdp.call("Runtime.evaluate", {
-            expression: `(() => {
-                const target = document.querySelector('[data-ag-active-target="true"]') ||
-                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
-                               document.querySelector('[data-lexical-editor="true"]');
-                if (target && document.activeElement !== target && !target.contains(document.activeElement)) {
-                    target.focus();
-                    target.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
-                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                }
-            })()`,
-            returnByValue: true,
-            contextId: targetContext.id
-        });
-    } catch (e) { }
-
-    // Helper: Read back editor text from target editor
-    const readEditorText = async () => {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: `(() => {
-                    const ed = document.querySelector('[data-ag-active-target="true"]') ||
-                               (document.activeElement?.getAttribute('data-lexical-editor') === 'true' ? document.activeElement : null) ||
-                               document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
-                               document.querySelector('[data-lexical-editor="true"]');
-                    return (ed?.innerText || '').trim();
-                })()`,
-                returnByValue: true,
-                contextId: targetContext.id
-            });
-            return res.result?.value ?? '';
-        } catch (e) {
-            return '';
+        const deadline = Date.now() + 30000;
+        const transport = cdp;
+        cdp = { ...transport, call: (...args) => {
+            if (Date.now() > deadline) return Promise.reject(new Error('Message submission timed out'));
+            return transport.call(...args);
+        } };
+        if (!text || typeof text !== 'string') {
+            return { ok: false, error: 'empty_text', message: '消息内容不能为空' };
         }
-    };
 
-    const before = await readEditorText();
+        const forceSteer = options.isSteer === true;
+        console.log(`[SEND] Processing message (chars: ${text.length}, forceSteer=${forceSteer})...`);
 
-    // Step 4: Clear any existing text via CDP SelectAll (Ctrl+A) + Backspace
-    try {
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
-    } catch (e) {
-        console.error('[SEND] CDP clear text error:', e);
-    }
+        // Step 1: Detect chat execution state (is the agent actively generating/running?)
+        const BUSY_CHECK = `(() => {
+            // Clear previous target markers
+            document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
 
-    // Step 5: Insert text via CDP Input.insertText
-    try {
-        await cdp.call('Input.insertText', { text });
-        console.log('[SEND] Text inserted via CDP Input.insertText');
-    } catch (e) {
-        console.error('[SEND] CDP insertText error:', e);
-    }
+            const inputArea = document.getElementById('antigravity.agentSidePanelInputBox') ||
+                              document.querySelector('#antigravity\\\\.agentSidePanelInputBox');
 
-    await new Promise(r => setTimeout(r, 150));
+            // The chat's active generation button is Cancel (Ctrl+D) inside the input box
+            const cancelBtn = inputArea ?
+                inputArea.querySelector('button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]') :
+                document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"]');
 
-    let afterInsert = await readEditorText();
-
-    // If first insert failed, re-focus and retry once
-    if (!afterInsert || !afterInsert.includes(text.slice(0, 20))) {
-        console.warn('[SEND] First insert attempt failed, re-focusing and retrying...');
-        try {
-            await cdp.call("Runtime.evaluate", {
-                expression: `(() => {
-                    const target = document.querySelector('[data-ag-active-target="true"]') ||
-                                   document.querySelector('[data-lexical-editor="true"]');
-                    if (target) {
-                        target.focus();
-                        target.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
-                    }
-                })()`,
-                contextId: targetContext.id
-            });
-            await cdp.call('Input.insertText', { text });
-            await new Promise(r => setTimeout(r, 150));
-            afterInsert = await readEditorText();
-        } catch (e) { }
-    }
-
-    // 前置断言: 确保内容已被写入输入框，否则立即报错返回 insert_failed
-    if (!afterInsert || !afterInsert.includes(text.slice(0, 20))) {
-        console.error(`[SEND] Insert assertion failed: afterInsert="${afterInsert}", expected slice="${text.slice(0, 20)}"`);
-        return { ok: false, error: 'insert_failed', message: '未能写入桌面端输入框' };
-    }
-
-    // Step 6: Multi-tier submission with verified editor clearing and step-by-step logging
-
-    // If NOT in steer mode, Priority 1: Check if send button is available and click it
-    if (!isSteerMode) {
-        const SUBMIT_EXP = `(async () => {
-            const target = document.querySelector('[data-ag-active-target="true"]');
-            const inputContainer = target?.closest('[id*="agentSidePanelInputBox"]') ||
-                                   document.getElementById('antigravity.agentSidePanelInputBox') || document;
-            const sendBtn = inputContainer.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
-            if (sendBtn && !sendBtn.disabled) {
-                sendBtn.click();
-                return { clicked: true };
-            }
-            return { clicked: false, disabled: !!(sendBtn && sendBtn.disabled) };
+            const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
+            return { busy: isBusy };
         })()`;
 
-        try {
-            const submitRes = await cdp.call("Runtime.evaluate", {
-                expression: SUBMIT_EXP,
+        let isAgentBusy = false;
+        for (const ctx of cdp.contexts) {
+            try {
+                const res = await cdp.call("Runtime.evaluate", {
+                    expression: BUSY_CHECK,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                });
+                if (res.result?.value?.busy) {
+                    isAgentBusy = true;
+                    break;
+                }
+            } catch (e) { }
+        }
+
+        const isSteerMode = isAgentBusy || forceSteer;
+        if (isSteerMode) {
+            console.log('[SEND] Agent is actively running. Processing message as STEER / INTERJECTION (插话引导)...');
+        }
+
+        // Step 2: Locate target editor inside Antigravity
+        const LOCATE_EXP = `(async () => {
+            document.querySelectorAll('[data-ag-active-target]').forEach(el => el.removeAttribute('data-ag-active-target'));
+
+            const cascade = document.getElementById('conversation') ||
+                            document.getElementById('chat') ||
+                            document.getElementById('cascade') ||
+                            document.querySelector('.isolate.overflow-y-auto') ||
+                            document.querySelector('[class*="scrollbar-hide"][class*="overflow-y-auto"]');
+
+            const allEditors = Array.from(document.querySelectorAll('[data-lexical-editor="true"], [contenteditable="true"]'))
+                .filter(el => el.offsetParent !== null || el.getClientRects().length > 0);
+
+            if (allEditors.length === 0) {
+                return { ok: false, error: "editor_not_found", message: "未找到输入框，请确认 Antigravity 界面正常打开" };
+            }
+
+            let target = null;
+            if (cascade) {
+                let curr = cascade;
+                while (curr && curr !== document.body) {
+                    target = allEditors.find(ed => curr.contains(ed));
+                    if (target) break;
+                    curr = curr.parentElement;
+                }
+            }
+            if (!target) {
+                target = allEditors.find(ed => {
+                    const box = ed.closest('[id*="agentSidePanelInputBox"]') || ed.parentElement;
+                    return box && box.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
+                }) || allEditors[0];
+            }
+
+            target.setAttribute('data-ag-active-target', 'true');
+            if (target.focus) target.focus();
+
+            const rect = target.getBoundingClientRect();
+            return {
+                ok: true,
+                isLexical: target.getAttribute('data-lexical-editor') === 'true',
+                pos: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+            };
+        })()`;
+
+        let locateResult = null;
+        let targetContext = null;
+
+        for (const ctx of cdp.contexts) {
+            try {
+                const res = await cdp.call("Runtime.evaluate", {
+                    expression: LOCATE_EXP,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                });
+                if (res.result?.value?.ok) {
+                    locateResult = res.result.value;
+                    targetContext = ctx;
+                    break;
+                }
+            } catch (e) { }
+        }
+
+        if (!locateResult || !targetContext) {
+            console.error('[SEND] Editor not found in any context');
+            return { ok: false, error: "editor_not_found", message: "未找到桌面端输入框" };
+        }
+
+        // From this point every check uses the exact marked editor. Losing that
+        // editor or CDP context must never be interpreted as an empty composer.
+        const readEditor = async (select = false) => {
+            const res = await cdp.call('Runtime.evaluate', {
+                expression: `(() => {
+                    const target = document.querySelector('[data-ag-active-target="true"]');
+                    if (!target || !target.isConnected) return { found: false };
+                    if (${select}) {
+                        target.focus();
+                        if (document.activeElement !== target && !target.contains(document.activeElement)) {
+                            return { found: true, focused: false };
+                        }
+                        const range = document.createRange();
+                        range.selectNodeContents(target);
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }
+                    return { found: true, focused: true, text: target.innerText || '' };
+                })()`,
                 returnByValue: true,
-                awaitPromise: true,
                 contextId: targetContext.id
             });
-            if (submitRes.result?.value?.clicked) {
-                await new Promise(r => setTimeout(r, 350));
-                const remaining = await readEditorText();
-                console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
-                if (!remaining) {
-                    console.log('[SEND] Verified: Submitted successfully via click_submit');
-                    return { ok: true, isSteer: false, method: 'click_submit', message: '已发送' };
-                }
-                console.warn(`[SEND] click_submit did not clear editor (len: ${remaining.length}), trying CDP Enter...`);
+            const value = res.result?.value;
+            if (res.exceptionDetails || !value?.found || !value.focused || typeof value.text !== 'string') {
+                throw new Error('Desktop editor is no longer available or focused');
             }
-        } catch (e) { }
-    } else {
-        console.log('[SEND] Steer mode active: skipping sendBtn.click to avoid triggering task cancel, proceeding directly to CDP Enter');
+            return value.text;
+        };
+        const normalize = value => value.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
+        const expected = normalize(text);
+        const before = normalize(await readEditor());
+        if (before && before !== expected) {
+            return { ok: false, error: 'desktop_draft_exists', message: '桌面输入框已有草稿，请先处理后再发送' };
+        }
+        if (before !== expected) {
+            await readEditor(true);
+            await cdp.call('Input.insertText', { text });
+            await new Promise(resolve => setTimeout(resolve, 150));
+            if (normalize(await readEditor()) !== expected) {
+                return { ok: false, error: 'insert_failed', message: '桌面输入内容未完整写入，草稿已保留，请检查后重试' };
+            }
+        }
+
+        // A dispatched submission is never followed by another submission method:
+        // a slow desktop may have accepted the first one already.
+        let method = 'cdp_enter';
+        if (!isSteerMode) {
+            submissionStarted = true;
+            const res = await cdp.call('Runtime.evaluate', {
+                expression: `(() => {
+                    const target = document.querySelector('[data-ag-active-target="true"]');
+                    if (!target) throw new Error('Editor lost before submit');
+                    const container = target.closest('[id*="agentSidePanelInputBox"]') || target.parentElement;
+                    const button = container?.querySelector('[data-testid="send-button"], [data-tooltip-id="input-send-button-send-tooltip"], button[aria-label*="Send"], button[aria-label*="发送"]');
+                    if (!button) return { clicked: false };
+                    // Some desktop builds disable this button while Enter still works.
+                    // Fall back only when no click has been dispatched.
+                    if (button.disabled || button.getAttribute('aria-disabled') === 'true') return { clicked: false };
+                    button.click();
+                    return { clicked: true };
+                })()`,
+                returnByValue: true,
+                contextId: targetContext.id
+            });
+            if (res.exceptionDetails || !res.result?.value) throw new Error('Cannot verify submit button state');
+            if (res.result.value.clicked) method = 'click_submit';
+            else submissionStarted = false;
+        }
+        if (method === 'cdp_enter') {
+            // Re-focus only; do not select or erase the message before Enter.
+            const focus = await cdp.call('Runtime.evaluate', {
+                expression: `(() => {
+                    const target = document.querySelector('[data-ag-active-target="true"]');
+                    target?.focus();
+                    return !!target && (document.activeElement === target || target.contains(document.activeElement));
+                })()`,
+                returnByValue: true,
+                contextId: targetContext.id
+            });
+            if (focus.result?.value !== true) throw new Error('Editor focus lost before Enter');
+            submissionStarted = true;
+            await cdp.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', windowsVirtualKeyCode: 13, code: 'Enter', key: 'Enter', text: '\r', unmodifiedText: '\r' });
+            await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 13, code: 'Enter', key: 'Enter' });
+        }
+        for (let attempt = 0; attempt < 15; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            if (!normalize(await readEditor())) {
+                return { ok: true, isSteer: isSteerMode, method, message: '已发送' };
+            }
+        }
+        return { ok: false, uncertain: true, error: 'submit_unconfirmed', message: '桌面尚未确认提交，请检查会话；草稿已保留' };
+    } catch (error) {
+        console.warn('[SEND] Desktop submission interrupted:', error.message);
+        return { ok: false, uncertain: submissionStarted, error: submissionStarted ? 'send_uncertain' : 'desktop_unavailable',
+            message: submissionStarted ? '提交结果未确认，请检查桌面会话，避免重复发送' : '桌面连接或输入框暂不可用，草稿已保留，请重试' };
     }
-
-    // Priority 2: Dispatch native Enter key via CDP (Primary submission for Steer / Interjection)
-    try {
-        await cdp.call('Input.dispatchKeyEvent', {
-            type: 'rawKeyDown',
-            windowsVirtualKeyCode: 13,
-            code: 'Enter',
-            key: 'Enter',
-            unmodifiedText: '\r',
-            text: '\r'
-        });
-        await cdp.call('Input.dispatchKeyEvent', {
-            type: 'char',
-            windowsVirtualKeyCode: 13,
-            code: 'Enter',
-            key: 'Enter',
-            unmodifiedText: '\r',
-            text: '\r'
-        });
-        await cdp.call('Input.dispatchKeyEvent', {
-            type: 'keyUp',
-            windowsVirtualKeyCode: 13,
-            code: 'Enter',
-            key: 'Enter'
-        });
-
-        await new Promise(r => setTimeout(r, 400));
-        const remaining = await readEditorText();
-        console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
-        if (!remaining) {
-            console.log(`[SEND] Verified: Submitted successfully via cdp_enter (isSteer=${isSteerMode})`);
-            return { 
-                ok: true, 
-                isSteer: isSteerMode, 
-                method: 'cdp_enter', 
-                message: isSteerMode ? '⚡ 插话已成功介入引导' : '已发送' 
-            };
-        }
-        console.warn(`[SEND] cdp_enter did not clear editor (len: ${remaining.length}), trying Fiber handleEnter...`);
-    } catch (e) {
-        console.error('[SEND] CDP enter key error:', e);
-    }
-
-    // Priority 3: Fallback to React Fiber handleEnter
-    const FIBER_ENTER_EXP = `(async () => {
-        try {
-            const target = document.querySelector('[data-ag-active-target="true"]') ||
-                           document.querySelector('#antigravity\\\\.agentSidePanelInputBox [data-lexical-editor="true"]') ||
-                           document.querySelector('[data-lexical-editor="true"]');
-            if (!target) return { ok: false };
-            const fiberKey = Object.keys(target).find(k => k.startsWith('__reactFiber'));
-            let curr = target[fiberKey];
-            while (curr) {
-                if (typeof curr.memoizedProps?.handleEnter === 'function') {
-                    const lex = curr.memoizedProps?.lexicalRef?.current;
-                    if (lex) {
-                        await curr.memoizedProps.handleEnter(new KeyboardEvent('keydown', { key: 'Enter' }), lex);
-                        return { ok: true };
-                    }
-                }
-                curr = curr.return;
-            }
-            return { ok: false };
-        } catch(e) {
-            return { ok: false, error: e.message };
-        }
-    })()`;
-
-    try {
-        const fiberRes = await cdp.call("Runtime.evaluate", {
-            expression: FIBER_ENTER_EXP,
-            returnByValue: true,
-            awaitPromise: true,
-            contextId: targetContext.id
-        });
-        if (fiberRes.result?.value?.ok) {
-            await new Promise(r => setTimeout(r, 400));
-            const remaining = await readEditorText();
-            console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
-            if (!remaining) {
-                console.log(`[SEND] Verified: Submitted successfully via fiber_handleEnter (isSteer=${isSteerMode})`);
-                return { 
-                    ok: true, 
-                    isSteer: isSteerMode, 
-                    method: 'fiber_handleEnter', 
-                    message: isSteerMode ? '⚡ 插话已成功介入引导' : '已发送' 
-                };
-            }
-        }
-    } catch (e) { }
-
-    const remaining = await readEditorText();
-    console.log('[SEND] before/afterInsert/afterSubmit:', before.length, afterInsert.length, remaining.length);
-
-    // Clean up editor content on failure so half-typed text does not remain
-    try {
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 2, windowsVirtualKeyCode: 65, code: 'KeyA', key: 'a' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 8, code: 'Backspace', key: 'Backspace' });
-    } catch (e) {}
-
-    console.error('[SEND] All submit methods failed: editor text was not cleared');
-    return {
-        ok: false,
-        error: 'submit_failed',
-        message: isSteerMode ? '插话提交失败，桌面端未响应' : '桌面端未响应提交，请检查桌面端状态'
-    };
 }
 
-// Set functionality mode (Turbo / Default / Request Review / Fast / Planning)
 async function setMode(cdp, mode) {
     const validModes = ['Turbo', 'Default', 'Request Review', 'Fast', 'Planning'];
     if (!validModes.some(m => m.toLowerCase() === mode.toLowerCase())) {
@@ -1070,6 +868,40 @@ async function clickElement(cdp, { selector, index, textContent }) {
     return { error: 'Click failed in all contexts or element not found at index' };
 }
 
+// Load older messages (history)
+export async function loadOlderMessages(cdp) {
+    const SCRIPT = `(() => {
+        const btn = document.querySelector('button[aria-label*="Load older messages"]');
+        if (btn) {
+            const before = btn.getAttribute('aria-label') || '';
+            btn.click();
+            return { success: true, clicked: true, before };
+        }
+        const scrollables = [...document.querySelectorAll('.isolate.overflow-y-auto, [class*="scrollbar-hide"][class*="overflow-y-auto"], #conversation, .overflow-y-auto')];
+        for (const el of scrollables) {
+            if (el.scrollHeight > el.clientHeight) {
+                el.scrollTop = 0;
+                return { success: true, scrolledTop: true };
+            }
+        }
+        return { success: false, reason: 'No load older messages button found' };
+    })()`;
+
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: SCRIPT,
+                returnByValue: true,
+                contextId: ctx.id
+            });
+            if (res.result?.value?.success) {
+                return res.result.value;
+            }
+        } catch(e) {}
+    }
+    return { success: false, error: 'Failed in all contexts' };
+}
+
 // Remote scroll - sync phone scroll to desktop
 async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
     // Try to scroll the chat container in Antigravity
@@ -1135,13 +967,7 @@ const MODELS_CATALOG = [
         desc: "极速长上下文与强逻辑推理，日常工程首选",
         contextWindow: "1,000,000",
         contextWindowNum: 1000000,
-        maxOutput: "8,192",
-        rpm: "15 ~ 360 RPM",
-        tpm: "1,000,000 ~ 4,000,000 TPM",
-        rpd: "1,500 ~ 10,000 RPD",
-        rateLimit: "高配额 (High RPM)",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "8,192"
     },
     {
         id: "gemini-3.1-pro",
@@ -1153,13 +979,7 @@ const MODELS_CATALOG = [
         desc: "复杂代码重构、跨模块系统分析与算法攻关",
         contextWindow: "2,000,000",
         contextWindowNum: 2000000,
-        maxOutput: "8,192",
-        rpm: "5 ~ 150 RPM",
-        tpm: "360,000 ~ 2,000,000 TPM",
-        rpd: "1,000 ~ 5,000 RPD",
-        rateLimit: "标准配额",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "8,192"
     },
     {
         id: "gemini-3-flash",
@@ -1171,13 +991,7 @@ const MODELS_CATALOG = [
         desc: "轻量高吞吐量日常助手，极低延迟",
         contextWindow: "1,000,000",
         contextWindowNum: 1000000,
-        maxOutput: "8,192",
-        rpm: "30 ~ 500 RPM",
-        tpm: "2,000,000 ~ 4,000,000 TPM",
-        rpd: "2,000 ~ 20,000 RPD",
-        rateLimit: "极高配额",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "8,192"
     },
     {
         id: "claude-sonnet-4.6",
@@ -1189,13 +1003,7 @@ const MODELS_CATALOG = [
         desc: "混合思考架构，复杂系统设计与精细代码修改",
         contextWindow: "200,000",
         contextWindowNum: 200000,
-        maxOutput: "8,192",
-        rpm: "50 RPM",
-        tpm: "100,000 TPM",
-        rpd: "1,000 ~ 4,000 RPD",
-        rateLimit: "标准配额",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "8,192"
     },
     {
         id: "claude-opus-4.6",
@@ -1207,13 +1015,7 @@ const MODELS_CATALOG = [
         desc: "顶级学术与极高复杂度推演，最强综合推理能力",
         contextWindow: "200,000",
         contextWindowNum: 200000,
-        maxOutput: "8,192",
-        rpm: "20 RPM",
-        tpm: "80,000 TPM",
-        rpd: "500 ~ 2,000 RPD",
-        rateLimit: "高级配额",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "8,192"
     },
     {
         id: "gpt-oss-120b",
@@ -1225,13 +1027,7 @@ const MODELS_CATALOG = [
         desc: "开源旗舰权重与通用编程推理",
         contextWindow: "128,000",
         contextWindowNum: 128000,
-        maxOutput: "4,096",
-        rpm: "60 RPM",
-        tpm: "150,000 TPM",
-        rpd: "3,000 RPD",
-        rateLimit: "标准配额",
-        cooldownWindow: "60s 滑动窗口自动恢复",
-        dailyReset: "08:00 CST (UTC 00:00)"
+        maxOutput: "4,096"
     }
 ];
 
@@ -1337,11 +1133,14 @@ async function setModel(cdp, modelName) {
 }
 
 // Get Usage Metrics
-async function getUsageMetrics(cdp) {
-    let appState = { mode: 'Turbo', model: 'Gemini 3.8 Flash High' };
-    try {
-        if (cdp) appState = await getAppState(cdp);
-    } catch(e) {}
+const readAccountQuota = createQuotaReader();
+
+export async function getUsageMetrics(cdp, options = {}) {
+    const fallbackState = { mode: 'Unknown', model: 'Unknown' };
+    const [accountQuota, appState] = await Promise.all([
+        readAccountQuota(cdp, options),
+        cdp ? getAppState(cdp).catch(() => fallbackState) : fallbackState
+    ]);
 
     let turnCount = 0;
     let userMsgCount = 0;
@@ -1358,8 +1157,8 @@ async function getUsageMetrics(cdp) {
         approxTokens = Math.round(strippedLen / 3.8);
     }
 
-    const currentModelName = appState.model || 'Gemini 3.8 Flash High';
-    const currentModeName = appState.mode || 'Turbo';
+    const currentModelName = appState.model || 'Unknown';
+    const currentModeName = appState.mode || 'Unknown';
 
     // Find active model in catalog
     const matchedModel = MODELS_CATALOG.find(m => 
@@ -1371,22 +1170,11 @@ async function getUsageMetrics(cdp) {
     const maxContextTokens = matchedModel.contextWindowNum || 1000000;
     const contextUsedPercent = Math.min(100, Math.max(1, parseFloat(((approxTokens / maxContextTokens) * 100).toFixed(1))));
 
-    // Calculate daily quota reset timestamp (Global reset is at UTC 00:00, which is Beijing Time 08:00 CST)
-    const now = new Date();
-    const nextDailyResetUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
-    const secondsUntilDailyReset = Math.max(0, Math.floor((nextDailyResetUtc.getTime() - now.getTime()) / 1000));
-    const hRemain = Math.floor(secondsUntilDailyReset / 3600);
-    const mRemain = Math.floor((secondsUntilDailyReset % 3600) / 60);
-    const sRemain = secondsUntilDailyReset % 60;
-    const dailyResetCountdown = `${String(hRemain).padStart(2, '0')}:${String(mRemain).padStart(2, '0')}:${String(sRemain).padStart(2, '0')}`;
-
-    // Sliding window cooldown (RPM/TPM is a 60-second rolling window)
-    const secondsUntilNextMinute = 60 - now.getUTCSeconds();
-
     return {
         success: true,
         model: currentModelName,
         mode: currentModeName,
+        serverTime: new Date().toISOString(),
         matchedModel,
         session: {
             turns: turnCount,
@@ -1398,15 +1186,7 @@ async function getUsageMetrics(cdp) {
             nodes: lastSnapshot?.stats?.nodes || 0,
             payloadKb: lastSnapshot ? Math.round((lastSnapshot.stats.htmlSize + lastSnapshot.stats.cssSize) / 1024) : 0
         },
-        quota: {
-            nextDailyResetUtc: nextDailyResetUtc.toISOString(),
-            nextDailyResetBeijing: '次日 08:00 CST',
-            dailyResetSecondsRemaining: secondsUntilDailyReset,
-            dailyResetCountdown,
-            slidingWindowSeconds: secondsUntilNextMinute,
-            dailyResetRule: '每日 00:00 UTC (北京时间 08:00) 统一重置 RPD 额度',
-            slidingWindowRule: 'RPM / TPM 突发超限采用 60 秒平滑滑动窗口自动恢复'
-        },
+        quota: accountQuota,
         system: {
             uptimeSeconds: Math.round(process.uptime()),
             uptimeFormatted: formatUptime(process.uptime()),
@@ -1486,7 +1266,7 @@ async function startNewChat(cdp) {
     return { error: 'Context failed' };
 }
 // Get Chat History - Scrapes conversations from sidebar and search modal with desktop-matching grouping
-async function getChatHistory(cdp) {
+export async function getChatHistory(cdp) {
     const EXP = `(async () => {
         try {
             const parseConversationLines = (lines) => {
@@ -1559,55 +1339,7 @@ async function getChatHistory(cdp) {
                 }
             }
 
-            // Strategy 2: Search Conversations modal for full history
-            const searchBtn = document.querySelector('[data-testid="sidebar-search-button"], [aria-label*="Search Conversations"], [aria-label*="Search conversations"]');
-            if (searchBtn) {
-                searchBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                searchBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                await new Promise(r => setTimeout(r, 450));
-
-                const modal = document.querySelector('[cmdk-root], [role="dialog"], [data-testid*="modal"], [class*="dialog"], [data-state="open"]');
-                if (modal) {
-                    const items = modal.querySelectorAll('[role="option"], [cmdk-item], [data-testid*="item"], div.cursor-pointer');
-                    for (const item of items) {
-                        const lines = (item.innerText || '').trim().split('\\n').map(s => s.trim()).filter(Boolean);
-                        const parsed = parseConversationLines(lines);
-                        if (parsed && parsed.title.length >= 2) {
-                            if (parsed.title.toLowerCase().startsWith('show ') && parsed.title.toLowerCase().endsWith('more...')) continue;
-                            if (parsed.title.toLowerCase().includes('search for conversations')) continue;
-
-                            if (seenTitles.has(parsed.title)) {
-                                const existing = seenTitles.get(parsed.title);
-                                if (!existing.workspace && parsed.workspace) {
-                                    existing.workspace = parsed.workspace;
-                                    if (existing.group === 'Conversations') {
-                                        existing.group = 'Projects';
-                                    }
-                                }
-                                if (!existing.timestamp && parsed.timestamp) {
-                                    existing.timestamp = parsed.timestamp;
-                                }
-                            } else {
-                                const newItem = {
-                                    title: parsed.title,
-                                    workspace: parsed.workspace,
-                                    timestamp: parsed.timestamp,
-                                    isActive: false,
-                                    isPinned: false,
-                                    group: parsed.workspace ? 'Projects' : 'Conversations'
-                                };
-                                seenTitles.set(parsed.title, newItem);
-                                chats.push(newItem);
-                            }
-                        }
-                    }
-                }
-
-                // Close search dialog with Escape
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-                document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-            }
+            // Polling is read-only: opening search here steals the composer focus.
 
             return { success: true, chats: chats };
         } catch (e) {
@@ -1900,7 +1632,18 @@ async function initCDP() {
     console.log(`✅ Found Antigravity on port ${cdpInfo.port} `);
 
     console.log('🔌 Connecting to CDP...');
-    cdpConnection = await connectCDP(cdpInfo.url);
+    const invalidateSnapshot = () => { lastSnapshot = null; lastSnapshotHash = null; };
+    let connection;
+    connection = await connectCDP(cdpInfo.url, {
+        onDisconnect: () => {
+            if (cdpConnection === connection) {
+                cdpConnection = null;
+                invalidateSnapshot();
+            }
+        },
+        onContextsCleared: invalidateSnapshot
+    });
+    cdpConnection = connection;
     console.log(`✅ Connected! Found ${cdpConnection.contexts.length} execution contexts\n`);
 }
 
@@ -1919,6 +1662,8 @@ async function startPolling(wss) {
                 // Was connected, now lost
                 console.log('🔄 CDP connection lost. Attempting to reconnect...');
                 cdpConnection = null;
+                lastSnapshot = null;
+                lastSnapshotHash = null;
             }
             try {
                 await initCDP();
@@ -1934,7 +1679,9 @@ async function startPolling(wss) {
         }
 
         try {
-            const snapshot = await captureSnapshot(cdpConnection);
+            const connection = cdpConnection;
+            const snapshot = await captureSnapshot(connection);
+            if (connection !== cdpConnection || connection.ws.readyState !== WebSocket.OPEN) return setTimeout(poll, POLL_INTERVAL);
             if (snapshot && !snapshot.error) {
                 const hash = hashString(snapshot.html);
 
@@ -1945,11 +1692,11 @@ async function startPolling(wss) {
 
                     // Broadcast to all connected clients
                     wss.clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
+                        if (client.authenticated && client.readyState === WebSocket.OPEN) {
                             client.send(JSON.stringify({
                                 type: 'snapshot_update',
                                 timestamp: new Date().toISOString()
-                            }));
+                            }), error => { if (error) client.terminate(); });
                         }
                     });
 
@@ -1964,7 +1711,7 @@ async function startPolling(wss) {
                     if (errorMsg.includes('container not found')) {
                         console.log('   (Tip: Ensure an active chat is open in Antigravity)');
                     }
-                    if (cdpConnection.contexts.length === 0) {
+                    if (connection.contexts.length === 0) {
                         console.log('   (Tip: No active execution contexts found. Try interacting with the Antigravity window)');
                     }
                     lastErrorLog = now;
@@ -1980,9 +1727,16 @@ async function startPolling(wss) {
     poll();
 }
 
+const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+
 // Create Express app
-async function createServer() {
+export async function createServer() {
     const app = express();
+    const sends = createSendCoordinator();
+    const desktopAction = handler => asyncRoute(async (req, res) => {
+        const executed = await sends.runAction(() => handler(req, res));
+        if (!executed) res.status(409).json({ success: false, error: 'desktop_busy', message: '桌面正在处理上一项操作，请稍后重试' });
+    });
 
     // Check for SSL certificates
     const keyPath = join(__dirname, 'certs', 'server.key');
@@ -2010,7 +1764,7 @@ async function createServer() {
     AUTH_TOKEN = hashString(APP_PASSWORD + authSalt);
 
     app.use(compression());
-    app.use(express.json());
+    app.use(express.json({ limit: '1mb' }));
 
     // Use a secure session secret from .env if available
     const sessionSecret = process.env.SESSION_SECRET || 'antigravity_secret_key_1337';
@@ -2089,8 +1843,12 @@ async function createServer() {
 
     // Get current snapshot
     app.get('/snapshot', (req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        if (!cdpConnection || cdpConnection.ws.readyState !== WebSocket.OPEN) {
+            return res.status(503).json({ error: 'cdp_disconnected', message: '桌面连接正在恢复' });
+        }
         if (!lastSnapshot) {
-            return res.status(503).json({ error: 'No snapshot available yet' });
+            return res.status(503).json({ error: 'snapshot_pending', message: '等待桌面会话同步' });
         }
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.json(lastSnapshot);
@@ -2122,7 +1880,7 @@ async function createServer() {
     });
 
     // Generate SSL certificates endpoint
-    app.post('/generate-ssl', async (req, res) => {
+    app.post('/generate-ssl', asyncRoute(async (req, res) => {
         try {
             const { execSync } = await import('child_process');
             execSync('node generate_ssl.js', { cwd: __dirname, stdio: 'pipe' });
@@ -2136,74 +1894,65 @@ async function createServer() {
                 error: e.message
             });
         }
-    });
+    }));
 
     // Debug UI Endpoint
-    app.get('/debug-ui', async (req, res) => {
+    app.get('/debug-ui', asyncRoute(async (req, res) => {
         if (!cdpConnection) return res.status(503).json({ error: 'CDP not connected' });
         const uiTree = await inspectUI(cdpConnection);
         console.log('--- UI TREE ---');
         console.log(uiTree);
         console.log('---------------');
         res.type('json').send(uiTree);
-    });
+    }));
 
     // Set Mode
-    app.post('/set-mode', async (req, res) => {
+    app.post('/set-mode', desktopAction(async (req, res) => {
         const { mode } = req.body;
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await setMode(cdpConnection, mode);
         res.json(result);
-    });
+    }));
 
     // Set Model
-    app.post('/set-model', async (req, res) => {
+    app.post('/set-model', desktopAction(async (req, res) => {
         const { model } = req.body;
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await setModel(cdpConnection, model);
         res.json(result);
-    });
+    }));
 
     // Stop Generation
-    app.post('/stop', async (req, res) => {
+    app.post('/stop', asyncRoute(async (req, res) => {
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await stopGeneration(cdpConnection);
         res.json(result);
-    });
+    }));
 
-    // Send message
-    app.post('/send', async (req, res) => {
-        const { message, isSteer } = req.body;
-        console.log(`[HTTP POST /send] Received message: "${(message || '').slice(0, 60)}" (isSteer=${!!isSteer})`);
-
-        if (!message) {
-            console.warn('[HTTP POST /send] Empty message rejected');
-            return res.status(400).json({ success: false, ok: false, error: 'Message required', message: '消息内容不能为空' });
+    // Send message (single writer + receipts for lost HTTP responses).
+    app.post('/send', asyncRoute(async (req, res) => {
+        const { message, isSteer = false, requestId } = req.body || {};
+        if (typeof message !== 'string' || !message.trim() || message.length > 100000) {
+            return res.status(400).json({ success: false, ok: false, error: 'invalid_message', message: '请输入有效消息（最多 100000 字符）' });
         }
-
-        if (!cdpConnection) {
-            console.error('[HTTP POST /send] CDP not connected');
-            return res.status(503).json({ success: false, ok: false, error: 'CDP not connected', message: 'CDP未连接' });
+        if (requestId !== undefined && (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId))) {
+            return res.status(400).json({ success: false, ok: false, error: 'invalid_request_id' });
         }
-
-        const result = await injectMessage(cdpConnection, message, { isSteer: !!isSteer });
-        const isOk = result?.ok === true;
-        console.log(`[HTTP POST /send] Result: ok=${isOk}, error=${result.error || 'none'}, method=${result.method || 'none'}, isSteer=${!!result.isSteer}`);
-
-        const statusCode = isOk ? 200 : 400;
-        res.status(statusCode).json({
-            success: isOk,
-            ok: isOk,
-            isSteer: !!result.isSteer,
-            error: isOk ? undefined : (result.error || 'submit_failed'),
-            method: result.method || (isOk ? 'unknown' : 'failed'),
-            message: result.message || (isOk ? (result.isSteer ? '⚡ 插话已成功介入引导' : '已发送') : '发送失败'),
-            details: result
+        const payload = { message: message.trim(), isSteer: !!isSteer };
+        const response = await sends.run(requestId, payload, async () => {
+            const connection = cdpConnection;
+            if (!connection || connection.ws.readyState !== WebSocket.OPEN) {
+                return { status: 503, body: { success: false, ok: false, error: 'cdp_disconnected', message: '桌面连接正在恢复，请稍后重试' } };
+            }
+            const result = await injectMessage(connection, payload.message, { isSteer: payload.isSteer });
+            return { status: result.ok ? 200 : 400, body: { ...result, success: result.ok === true, ok: result.ok === true } };
         });
-    });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(response.status).json(response.body);
+    }));
 
     // UI Inspection endpoint - Returns all buttons as JSON for debugging
-    app.get('/ui-inspect', async (req, res) => {
+    app.get('/ui-inspect', asyncRoute(async (req, res) => {
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
 
         const EXP = `(() => {
@@ -2392,10 +2141,10 @@ async function createServer() {
         } catch (e) {
             res.status(500).json({ error: e.message, stack: e.stack });
         }
-    });
+    }));
 
     // Endpoint to list all CDP targets - helpful for debugging connection issues
-    app.get('/cdp-targets', async (req, res) => {
+    app.get('/cdp-targets', asyncRoute(async (req, res) => {
         const results = {};
         for (const port of PORTS) {
             try {
@@ -2406,20 +2155,21 @@ async function createServer() {
             }
         }
         res.json(results);
-    });
+    }));
 
     // WebSocket connection with Auth check
     // RFC 6455 Ping/Pong keep-alive: prevents Cloudflare (100s idle timeout) and carrier NAT drops
     const pingInterval = setInterval(() => {
         wss.clients.forEach((ws) => {
+            if (!ws.authenticated || ws.readyState !== WebSocket.OPEN) return;
             if (ws.isAlive === false) {
                 console.log('📱 Terminating dead WebSocket client (heartbeat missed)');
                 return ws.terminate();
             }
             ws.isAlive = false;
             try {
-                ws.ping();
-            } catch (err) {}
+                ws.ping(error => { if (error) ws.terminate(); });
+            } catch (err) { ws.terminate(); }
         });
     }, 25000);
 
@@ -2428,6 +2178,10 @@ async function createServer() {
     });
 
     wss.on('connection', (ws, req) => {
+        ws.on('error', error => {
+            console.warn('[WS] Client error:', error.message);
+            ws.terminate();
+        });
         // Track heartbeat state
         ws.isAlive = true;
         ws.on('pong', () => {
@@ -2475,11 +2229,112 @@ async function createServer() {
             return;
         }
 
+        ws.authenticated = true;
+        ws.on('message', raw => {
+            try {
+                const data = JSON.parse(raw);
+                if (data.type === 'ping' && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'pong', cdpConnected: cdpConnection?.ws.readyState === WebSocket.OPEN }), error => {
+                        if (error) ws.terminate();
+                    });
+                }
+            } catch { /* Ignore malformed client messages. */ }
+        });
         console.log('📱 Client connected (Authenticated)');
 
         ws.on('close', () => {
             console.log('📱 Client disconnected');
         });
+    });
+
+    // Remote Click
+    app.post('/remote-click', desktopAction(async (req, res) => {
+        const { selector, index, textContent } = req.body;
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await clickElement(cdpConnection, { selector, index, textContent });
+        res.json(result);
+    }));
+
+    // Remote Scroll - sync phone scroll to desktop
+    app.post('/remote-scroll', asyncRoute(async (req, res) => {
+        const { scrollTop, scrollPercent } = req.body;
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await remoteScroll(cdpConnection, { scrollTop, scrollPercent });
+        res.json(result);
+    }));
+
+    // Load Older Messages (History)
+    app.post('/load-older-messages', asyncRoute(async (req, res) => {
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await loadOlderMessages(cdpConnection);
+        lastSnapshot = null;
+        lastSnapshotHash = null;
+        res.json(result);
+    }));
+
+    // Get App State
+    app.get('/app-state', asyncRoute(async (req, res) => {
+        if (!cdpConnection) return res.json({ mode: 'Unknown', model: 'Unknown' });
+        const result = await getAppState(cdpConnection);
+        res.json(result);
+    }));
+
+    // Get Available Models Catalog
+    app.get('/models', (req, res) => {
+        res.json({ success: true, models: MODELS_CATALOG });
+    });
+
+    // Get Usage & Quota Metrics
+    app.get('/usage', asyncRoute(async (req, res) => {
+        const metrics = await getUsageMetrics(cdpConnection, { forceRefresh: req.query.refresh === '1' });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(metrics);
+    }));
+
+    // Start New Chat
+    app.post('/new-chat', desktopAction(async (req, res) => {
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await startNewChat(cdpConnection);
+        if (result.success) { lastSnapshot = null; lastSnapshotHash = null; }
+        res.json(result);
+    }));
+
+    // Get Chat History
+    app.get('/chat-history', asyncRoute(async (req, res) => {
+        if (!cdpConnection) return res.json({ error: 'CDP disconnected', chats: [] });
+        const result = await getChatHistory(cdpConnection);
+        res.json(result);
+    }));
+
+    // Select a Chat
+    app.post('/select-chat', desktopAction(async (req, res) => {
+        const { title } = req.body;
+        if (!title) return res.status(400).json({ error: 'Chat title required' });
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await selectChat(cdpConnection, title);
+        if (result.success) { lastSnapshot = null; lastSnapshotHash = null; }
+        res.json(result);
+    }));
+
+    // Close Chat History
+    app.post('/close-history', desktopAction(async (req, res) => {
+        if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+        const result = await closeHistory(cdpConnection);
+        res.json(result);
+    }));
+
+    // Check if Chat is Open
+    app.get('/chat-status', asyncRoute(async (req, res) => {
+        if (!cdpConnection) return res.json({ hasChat: false, hasMessages: false, editorFound: false });
+        const result = await hasChatOpen(cdpConnection);
+        res.json(result);
+    }));
+
+
+    app.use((error, req, res, next) => {
+        console.error(`[HTTP] ${req.method} ${req.path}:`, error.message);
+        if (res.headersSent) return next(error);
+        res.status(error.status || 500).json({ success: false, error: error.type || 'request_failed', message: '请求失败，请稍后重试' });
     });
 
     return { server, wss, app, hasSSL };
@@ -2495,81 +2350,10 @@ async function main() {
     }
 
     try {
-        const { server, wss, app, hasSSL } = await createServer();
+        const { server, wss, hasSSL } = await createServer();
 
         // Start background polling (it will now handle reconnections)
         startPolling(wss);
-
-        // Remote Click
-        app.post('/remote-click', async (req, res) => {
-            const { selector, index, textContent } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await clickElement(cdpConnection, { selector, index, textContent });
-            res.json(result);
-        });
-
-        // Remote Scroll - sync phone scroll to desktop
-        app.post('/remote-scroll', async (req, res) => {
-            const { scrollTop, scrollPercent } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await remoteScroll(cdpConnection, { scrollTop, scrollPercent });
-            res.json(result);
-        });
-
-        // Get App State
-        app.get('/app-state', async (req, res) => {
-            if (!cdpConnection) return res.json({ mode: 'Unknown', model: 'Unknown' });
-            const result = await getAppState(cdpConnection);
-            res.json(result);
-        });
-
-        // Get Available Models Catalog
-        app.get('/models', (req, res) => {
-            res.json({ success: true, models: MODELS_CATALOG });
-        });
-
-        // Get Usage & Quota Metrics
-        app.get('/usage', async (req, res) => {
-            const metrics = await getUsageMetrics(cdpConnection);
-            res.json(metrics);
-        });
-
-        // Start New Chat
-        app.post('/new-chat', async (req, res) => {
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await startNewChat(cdpConnection);
-            res.json(result);
-        });
-
-        // Get Chat History
-        app.get('/chat-history', async (req, res) => {
-            if (!cdpConnection) return res.json({ error: 'CDP disconnected', chats: [] });
-            const result = await getChatHistory(cdpConnection);
-            res.json(result);
-        });
-
-        // Select a Chat
-        app.post('/select-chat', async (req, res) => {
-            const { title } = req.body;
-            if (!title) return res.status(400).json({ error: 'Chat title required' });
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await selectChat(cdpConnection, title);
-            res.json(result);
-        });
-
-        // Close Chat History
-        app.post('/close-history', async (req, res) => {
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await closeHistory(cdpConnection);
-            res.json(result);
-        });
-
-        // Check if Chat is Open
-        app.get('/chat-status', async (req, res) => {
-            if (!cdpConnection) return res.json({ hasChat: false, hasMessages: false, editorFound: false });
-            const result = await hasChatOpen(cdpConnection);
-            res.json(result);
-        });
 
         // Kill any existing process on the port before starting
         await killPortProcess(SERVER_PORT);
@@ -2616,4 +2400,6 @@ async function main() {
     }
 }
 
-main();
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+    main();
+}

@@ -25,6 +25,12 @@ const statusText = document.getElementById('statusText');
 const statsText = document.getElementById('statsText');
 const refreshBtn = document.getElementById('refreshBtn');
 const stopBtn = document.getElementById('stopBtn');
+const headerThemeBtn = document.getElementById('headerThemeBtn');
+const headerThemeIcon = document.getElementById('headerThemeIcon');
+const sidebarThemeSwitch = document.getElementById('sidebarThemeSwitch');
+const historyLoaderBar = document.getElementById('historyLoaderBar');
+const historyLoadMoreBtn = document.getElementById('historyLoadMoreBtn');
+const historyLoaderText = document.getElementById('historyLoaderText');
 
 const modeBtn = document.getElementById('modeBtn');
 const modeText = document.getElementById('modeText');
@@ -74,6 +80,408 @@ let rawConversations = [];
 let availableModels = [];
 
 const USER_SCROLL_LOCK_DURATION = 3000;
+
+// --- Theme Management (Dark / Light / System) ---
+const THEME_STORAGE_KEY = 'ag_theme_preference';
+let currentThemePref = (function() {
+    try {
+        if (typeof localStorage !== 'undefined') {
+            return localStorage.getItem(THEME_STORAGE_KEY) || 'system';
+        }
+    } catch (e) {}
+    return 'system';
+})();
+
+function getSystemTheme() {
+    try {
+        if (typeof window !== 'undefined' && window.matchMedia) {
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+    } catch (e) {}
+    return 'dark';
+}
+
+function resolveTheme(pref) {
+    if (pref === 'system') return getSystemTheme();
+    return pref === 'light' ? 'light' : 'dark';
+}
+
+function generateSnapshotStyles(rawCss) {
+    return `/* --- BASE SNAPSHOT CSS --- */
+${rawCss || ''}
+
+/* --- THEME CSS VARIABLES & CODEX OVERRIDES --- */
+:root, body, #chatContent, #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
+    --bg-app: var(--bg-app) !important;
+    --text-main: var(--text-main) !important;
+    --text-muted: var(--text-muted) !important;
+    --border-color: var(--border) !important;
+    --background: var(--bg-app) !important;
+    --foreground: var(--text-main) !important;
+    --card: var(--bg-card) !important;
+    --card-foreground: var(--text-main) !important;
+    --card-border: var(--border) !important;
+    --secondary: var(--bg-card) !important;
+    --secondary-foreground: var(--text-main) !important;
+    --muted: var(--bg-panel) !important;
+    --muted-foreground: var(--text-muted) !important;
+    --border: var(--border) !important;
+    --primary: var(--accent) !important;
+    --primary-foreground: #ffffff !important;
+    --accent: var(--accent) !important;
+    --accent-foreground: #ffffff !important;
+    --popover: var(--bg-card) !important;
+    --popover-foreground: var(--text-main) !important;
+    --max-conversation-width: 100% !important;
+    color: var(--text-main) !important;
+}
+
+#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
+    container-type: normal !important;
+}
+
+#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
+    background-color: transparent !important;
+    color: var(--text-main) !important;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
+    position: relative !important;
+    height: auto !important;
+    min-height: 100% !important;
+    width: 100% !important;
+    overflow: visible !important;
+    display: block !important;
+    padding-right: 0px !important;
+}
+
+#conversation p, #conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation li, #conversation td, #conversation th {
+    color: var(--text-main) !important;
+    font-size: 15px;
+    line-height: 1.68;
+}
+
+#conversation h1, #conversation h2, #conversation h3 {
+    color: var(--text-main) !important;
+    font-weight: 600;
+    margin-top: 18px;
+    margin-bottom: 8px;
+}
+
+/* --- CANCEL STICKY POSITIONING (Fix user message floating at top) --- */
+#conversation .sticky,
+#conversation [class*="sticky"],
+#conversation [class*="md-sticky-message-bleed"] {
+    position: static !important;
+    top: auto !important;
+    z-index: 1 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+#conversation [class*="md-sticky-message-bleed"]::before,
+#conversation [class*="md-sticky-message-bleed"]::after {
+    display: none !important;
+}
+
+/* --- RESET OUTER WRAPPERS (Fix double bubble wrappers) --- */
+#conversation div[class*="bg-background"],
+#conversation div[class*="bg-background"]:has([class*="user-input-step"]) {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* --- SINGLE CLEAN USER MESSAGE BUBBLE --- */
+#conversation div[data-testid="user-input-step"],
+#conversation div[class*="group/user-input-step"] {
+    background: var(--bg-user-bubble) !important;
+    color: var(--text-user-bubble) !important;
+    border-radius: 18px !important;
+    border: 1px solid var(--border-user-bubble) !important;
+    padding: 12px 18px !important;
+    margin: 14px 0 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+    max-width: 82% !important;
+    margin-left: auto !important;
+    width: fit-content !important;
+    position: static !important;
+}
+
+/* --- REMOVE REDUNDANT INNER BLACK CARD BACKGROUNDS --- */
+#conversation div[class*="group/user-input-step"] .bg-card-border,
+#conversation div[class*="group/user-input-step"] .bg-card,
+#conversation div[class*="group/user-input-step"] [class*="bg-card"],
+#conversation div[class*="group/user-input-step"] div,
+#conversation div[class*="group/user-input-step"] p,
+#conversation div[class*="group/user-input-step"] span {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+#conversation div[class*="group/user-input-step"] [data-quotable="true"] {
+    color: var(--text-user-bubble) !important;
+    font-size: 14.5px !important;
+    line-height: 1.6 !important;
+    background: transparent !important;
+}
+
+/* Thinking & Reasoning blocks - Codex collapsible thought */
+#conversation [data-testid="worked-for-collapsible"], 
+#conversation button[class*="tabular-nums"], 
+#conversation button:has(svg):has(span) {
+    background: var(--bg-thought) !important;
+    border: 1px solid var(--border-thought) !important;
+    border-radius: 8px !important;
+    color: var(--text-thought) !important;
+    padding: 6px 12px !important;
+    margin: 8px 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    cursor: pointer !important;
+    font-size: 12.5px !important;
+    transition: all 0.15s ease !important;
+}
+
+#conversation [data-testid="worked-for-collapsible"]:hover,
+#conversation button[class*="tabular-nums"]:hover,
+#conversation button:has(svg):has(span):hover {
+    background: var(--bg-card-hover) !important;
+    border-color: var(--border-active) !important;
+    color: var(--text-main) !important;
+}
+
+/* Code Blocks - Codex Signature Code Box */
+pre, code, .monaco-editor-background, [class*="terminal"] {
+    background-color: var(--bg-code) !important;
+    color: var(--text-code) !important;
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
+    border-radius: 8px;
+    border: none;
+}
+
+pre {
+    position: relative !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    padding: 0 !important;
+    margin: 16px 0 !important;
+    width: 100% !important;
+    border: 1px solid var(--border-code) !important;
+    border-radius: 10px !important;
+    line-height: 1.55 !important;
+    overflow: hidden !important;
+}
+
+pre > code, pre:not(:has(> code)) {
+    display: block !important;
+    padding: 12px 16px 14px !important;
+    overflow-x: auto !important;
+}
+
+.codex-code-bar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    height: 36px !important;
+    background: var(--bg-code-header) !important;
+    border-bottom: 1px solid var(--border-code) !important;
+    padding: 0 14px !important;
+    user-select: none !important;
+}
+
+.codex-code-lang {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: var(--text-secondary) !important;
+    font-family: 'JetBrains Mono', Consolas, monospace !important;
+    text-transform: lowercase !important;
+    letter-spacing: 0.3px !important;
+}
+
+.codex-copy-btn {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    font-family: 'Inter', system-ui, sans-serif !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 4px 8px !important;
+    border-radius: 6px !important;
+    transition: all 0.15s ease !important;
+}
+
+.codex-copy-btn:hover {
+    color: var(--text-main) !important;
+    background: var(--border) !important;
+}
+
+/* History Load Older Button if rendered */
+.ag-load-older-btn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 12px auto !important;
+    padding: 8px 18px !important;
+    border-radius: 9999px !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    cursor: pointer !important;
+}
+
+.ag-load-older-btn:hover {
+    background: var(--bg-card-hover) !important;
+    color: var(--text-main) !important;
+}`;
+}
+
+function applyTheme(pref, save = true) {
+    currentThemePref = pref || 'system';
+    if (save) {
+        try {
+            if (typeof localStorage !== 'undefined') {
+                localStorage.setItem(THEME_STORAGE_KEY, currentThemePref);
+            }
+        } catch (e) {}
+    }
+    const resolved = resolveTheme(currentThemePref);
+
+    const doc = (typeof document !== 'undefined') ? (document.documentElement || document.body) : null;
+    if (doc && doc.setAttribute) {
+        doc.setAttribute('data-theme', resolved);
+        doc.setAttribute('data-theme-preference', currentThemePref);
+    }
+
+    // Update sidebar theme chips
+    const chips = (typeof document !== 'undefined' && document.querySelectorAll) ? document.querySelectorAll('.theme-chip') : [];
+    if (chips && chips.forEach) {
+        chips.forEach(chip => {
+            if (chip.dataset && chip.dataset.themeVal) {
+                if (chip.classList && chip.classList.toggle) {
+                    chip.classList.toggle('active', chip.dataset.themeVal === currentThemePref);
+                }
+            }
+        });
+    }
+
+    // Update header theme icon
+    const headerIcon = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('headerThemeIcon') : null;
+    const headerBtn = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('headerThemeBtn') : null;
+    if (headerIcon) {
+        if (resolved === 'dark') {
+            headerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
+        } else {
+            headerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
+        }
+    }
+    if (headerBtn) {
+        const label = currentThemePref === 'system' ? `跟随系统 (${resolved === 'dark' ? '深色' : '浅色'})` : (currentThemePref === 'light' ? '浅色模式' : '深色模式');
+        headerBtn.title = `深浅主题: ${label} (点击切换)`;
+    }
+
+    // Update snapshot style tag if loaded
+    const styleTag = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('cdp-styles') : null;
+    if (styleTag && styleTag.dataset && styleTag.dataset.rawCss) {
+        styleTag.textContent = generateSnapshotStyles(styleTag.dataset.rawCss);
+    }
+}
+
+function cycleTheme() {
+    const order = ['system', 'light', 'dark'];
+    const nextIdx = (order.indexOf(currentThemePref) + 1) % order.length;
+    const nextTheme = order[nextIdx];
+    applyTheme(nextTheme, true);
+    if (typeof showToast === 'function') {
+        showToast(`已切换主题为: ${nextTheme === 'system' ? '跟随系统' : (nextTheme === 'light' ? '浅色模式' : '深色模式')}`, 'info');
+    }
+}
+
+function initTheme() {
+    applyTheme(currentThemePref, false);
+
+    if (typeof window !== 'undefined' && window.matchMedia) {
+        try {
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+                if (currentThemePref === 'system') {
+                    applyTheme('system', false);
+                }
+            });
+        } catch (e) {}
+    }
+
+    const chips = (typeof document !== 'undefined' && document.querySelectorAll) ? document.querySelectorAll('.theme-chip') : [];
+    if (chips && chips.forEach) {
+        chips.forEach(chip => {
+            if (chip.addEventListener) {
+                chip.addEventListener('click', () => {
+                    if (chip.dataset && chip.dataset.themeVal) {
+                        applyTheme(chip.dataset.themeVal, true);
+                    }
+                });
+            }
+        });
+    }
+
+    const headerBtn = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('headerThemeBtn') : null;
+    if (headerBtn && headerBtn.addEventListener) {
+        headerBtn.addEventListener('click', cycleTheme);
+    }
+}
+
+// --- History Loading Management (拉取更多历史记录) ---
+let isLoadingOlderHistory = false;
+let lastHistoryLoadTime = 0;
+
+async function requestOlderMessages() {
+    if (isLoadingOlderHistory) return;
+    const now = Date.now();
+    if (now - lastHistoryLoadTime < 1500) return;
+    isLoadingOlderHistory = true;
+    lastHistoryLoadTime = now;
+
+    if (historyLoadMoreBtn && historyLoadMoreBtn.classList) {
+        historyLoadMoreBtn.classList.add('loading');
+    }
+    const origText = historyLoaderText ? historyLoaderText.textContent : '';
+    if (historyLoaderText) historyLoaderText.textContent = '正在拉取更早历史消息...';
+
+    const prevScrollHeight = chatContainer ? chatContainer.scrollHeight : 0;
+    const prevScrollTop = chatContainer ? chatContainer.scrollTop : 0;
+
+    try {
+        const res = await fetchWithAuth('/load-older-messages', { method: 'POST' });
+        if (res.ok) {
+            await loadSnapshot();
+            if (chatContainer) {
+                const newScrollHeight = chatContainer.scrollHeight;
+                const diff = newScrollHeight - prevScrollHeight;
+                if (diff > 0) {
+                    chatContainer.scrollTop = prevScrollTop + diff;
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load older messages:', err);
+    } finally {
+        isLoadingOlderHistory = false;
+        if (historyLoadMoreBtn && historyLoadMoreBtn.classList) {
+            historyLoadMoreBtn.classList.remove('loading');
+        }
+        if (historyLoaderText && origText) {
+            historyLoaderText.textContent = origText;
+        }
+    }
+}
 
 // --- Send Button Visual State (Codex style empty vs has-text) ---
 function updateSendButtonState() {
@@ -495,189 +903,36 @@ async function loadSnapshot(isManual = false) {
             if (statsText) statsText.textContent = `${nodes} Nodes · ${kbs}KB`;
         }
 
-        // CSS Injection (Cached)
+        // CSS Injection (Cached & Theme Adaptive)
         let styleTag = document.getElementById('cdp-styles');
-        if (!styleTag) {
+        if (!styleTag && document.head && document.head.appendChild) {
             styleTag = document.createElement('style');
             styleTag.id = 'cdp-styles';
             document.head.appendChild(styleTag);
         }
 
-        const darkModeOverrides = `/* --- BASE SNAPSHOT CSS --- */
-${data.css}
+        if (styleTag) {
+            if (!styleTag.dataset) styleTag.dataset = {};
+            if (styleTag.dataset.rawCss !== data.css) {
+                styleTag.dataset.rawCss = data.css;
+                styleTag.textContent = generateSnapshotStyles(data.css);
+            }
+        }
 
-/* --- FORCE DARK MODE & CODEX OBSIDIAN OVERRIDES --- */
-:root, body, #chatContent, #conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
-    --bg-app: #0d0d0d !important;
-    --text-main: #ececec !important;
-    --text-muted: #8e8e8e !important;
-    --border-color: rgba(255, 255, 255, 0.08) !important;
-    --background: #0d0d0d !important;
-    --foreground: #ececec !important;
-    --card: #1e1e1e !important;
-    --card-foreground: #ececec !important;
-    --card-border: rgba(255, 255, 255, 0.08) !important;
-    --secondary: #262626 !important;
-    --secondary-foreground: #ececec !important;
-    --muted: #1e1e1e !important;
-    --muted-foreground: #8e8e8e !important;
-    --border: rgba(255, 255, 255, 0.08) !important;
-    --primary: #10a37f !important;
-    --primary-foreground: #ffffff !important;
-    --accent: #10a37f !important;
-    --accent-foreground: #ffffff !important;
-    --popover: #1e1e1e !important;
-    --popover-foreground: #ececec !important;
-    --max-conversation-width: 100% !important;
-    color: #ececec !important;
-}
-
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"], #chatContent, #conversation * {
-    container-type: normal !important;
-}
-
-#conversation, .antigravity-snapshot-root, [data-testid="autoscroll-viewport"] {
-    background-color: transparent !important;
-    color: #ececec !important;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
-    position: relative !important;
-    height: auto !important;
-    min-height: 100% !important;
-    width: 100% !important;
-    overflow: visible !important;
-    display: block !important;
-    padding-right: 0px !important;
-}
-
-#conversation p, #conversation h1, #conversation h2, #conversation h3, #conversation h4, #conversation li, #conversation td, #conversation th {
-    color: #ececec !important;
-    font-size: 15px;
-    line-height: 1.68;
-}
-
-#conversation h1, #conversation h2, #conversation h3 {
-    color: #ffffff !important;
-    font-weight: 600;
-    margin-top: 18px;
-    margin-bottom: 8px;
-}
-
-/* User Message Bubble - Codex Prompt Card */
-#conversation div[class*="group/user-input-step"],
-#conversation div[class*="bg-background"],
-#conversation [class*="md-sticky-message-bleed"] {
-    background: #262626 !important;
-    color: #f5f5f5 !important;
-    border-radius: 18px !important;
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
-    padding: 12px 18px !important;
-    margin: 14px 0 !important;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
-    max-width: 88% !important;
-    margin-left: auto !important;
-}
-
-#conversation [class*="md-sticky-message-bleed"]::after {
-    display: none !important;
-}
-
-/* Thinking & Reasoning blocks - Codex collapsible thought */
-#conversation [data-testid="worked-for-collapsible"], 
-#conversation button[class*="tabular-nums"], 
-#conversation button:has(svg):has(span) {
-    background: rgba(255, 255, 255, 0.03) !important;
-    border: 1px solid rgba(255, 255, 255, 0.08) !important;
-    border-radius: 8px !important;
-    color: #8e8e8e !important;
-    padding: 6px 12px !important;
-    margin: 8px 0 !important;
-    display: flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    cursor: pointer !important;
-    font-size: 12.5px !important;
-    transition: all 0.15s ease !important;
-}
-
-#conversation [data-testid="worked-for-collapsible"]:hover,
-#conversation button[class*="tabular-nums"]:hover,
-#conversation button:has(svg):has(span):hover {
-    background: rgba(255, 255, 255, 0.06) !important;
-    border-color: rgba(255, 255, 255, 0.14) !important;
-    color: #ececec !important;
-}
-
-/* Code Blocks - Codex Signature Code Box */
-pre, code, .monaco-editor-background, [class*="terminal"] {
-    background-color: #0f0f0f !important;
-    color: #e5e5e5 !important;
-    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
-    border-radius: 8px;
-    border: none;
-}
-
-pre {
-    position: relative !important;
-    white-space: pre-wrap !important;
-    word-break: break-word !important;
-    padding: 0 !important;
-    margin: 16px 0 !important;
-    width: 100% !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    border-radius: 10px !important;
-    line-height: 1.55 !important;
-    overflow: hidden !important;
-}
-
-pre > code, pre:not(:has(> code)) {
-    display: block !important;
-    padding: 12px 16px 14px !important;
-    overflow-x: auto !important;
-}
-
-.codex-code-bar {
-    display: flex !important;
-    align-items: center !important;
-    justify-content: space-between !important;
-    height: 36px !important;
-    background: #1e1e1e !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
-    padding: 0 14px !important;
-    user-select: none !important;
-}
-
-.codex-code-lang {
-    font-size: 12px !important;
-    font-weight: 500 !important;
-    color: #b4b4b4 !important;
-    font-family: 'JetBrains Mono', Consolas, monospace !important;
-    text-transform: lowercase !important;
-    letter-spacing: 0.3px !important;
-}
-
-.codex-copy-btn {
-    background: transparent !important;
-    border: none !important;
-    color: #b4b4b4 !important;
-    font-size: 12px !important;
-    font-family: 'Inter', system-ui, sans-serif !important;
-    cursor: pointer !important;
-    display: flex !important;
-    align-items: center !important;
-    gap: 6px !important;
-    padding: 4px 8px !important;
-    border-radius: 6px !important;
-    transition: all 0.15s ease !important;
-}
-
-.codex-copy-btn:hover {
-    color: #ffffff !important;
-    background: rgba(255, 255, 255, 0.08) !important;
-}`;
-
-        if (styleTag.dataset.rawCss !== data.css) {
-            styleTag.dataset.rawCss = data.css;
-            styleTag.textContent = darkModeOverrides;
+        // History older messages indicator update
+        if (data.history && data.history.hasOlder) {
+            if (historyLoaderBar) {
+                historyLoaderBar.style.display = 'flex';
+                if (historyLoaderText) {
+                    if (data.history.showing && data.history.total) {
+                        historyLoaderText.textContent = `加载更早历史消息 (已显示 ${data.history.showing}/${data.history.total})`;
+                    } else {
+                        historyLoaderText.textContent = '加载更早历史消息';
+                    }
+                }
+            }
+        } else if (historyLoaderBar) {
+            historyLoaderBar.style.display = 'none';
         }
 
         const wasEmpty = !chatContent.firstElementChild ||
@@ -1609,6 +1864,11 @@ chatContainer.addEventListener('scroll', () => {
     userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
     clearTimeout(idleTimer);
 
+    // Auto pull older messages when scrolled to the very top
+    if (chatContainer.scrollTop <= 30 && historyLoaderBar && historyLoaderBar.style.display !== 'none') {
+        requestOlderMessages();
+    }
+
     const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
     if (isNearBottom) {
         scrollToBottomBtn.classList.remove('show');
@@ -1630,6 +1890,23 @@ scrollToBottomBtn.addEventListener('click', () => {
         behavior: 'smooth'
     });
 });
+
+if (historyLoadMoreBtn) {
+    historyLoadMoreBtn.addEventListener('click', () => {
+        requestOlderMessages();
+    });
+}
+
+if (chatContent) {
+    chatContent.addEventListener('click', (e) => {
+        const olderBtn = e.target.closest && (e.target.closest('.ag-load-older-btn') || e.target.closest('[aria-label*="Load older messages"]'));
+        if (olderBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            requestOlderMessages();
+        }
+    });
+}
 
 // Virtual Keyboard compensation for mobile
 if (window.visualViewport) {
@@ -1789,6 +2066,7 @@ if (closeSupportBtn) {
 }
 
 // --- Init Application ---
+initTheme();
 initSidebarState();
 connectWebSocket();
 fetchAppState();

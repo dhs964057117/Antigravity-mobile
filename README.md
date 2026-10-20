@@ -56,8 +56,10 @@
 * **清晰参数指引**：卡片展示厂商属性、上下文容量（1M/2M/200k）、思考推理级别（High / Thinking）与当前生效状态。
 
 ### 10. 📊 实时会话用量与配额监控 (Usage & Quota Dashboard)
-* **会话消耗透视**：直观展示对话轮次 (Turns)、估算消耗 Tokens、上下文利用率渐变进度条、渲染 DOM 节点数及网络载荷。
-* **配额与限制速查**：汇总各模型的速率限制（RPM/TPM）及重置机制，配合服务健康度（Uptime、内存、WebSocket 实时信道）全景看板。
+* **会话用量估算**：展示当前同步页面的估算对话轮次、Tokens 和数据量，并明确标注估算来源。
+* **账户模型组配额**：打开“用量与配额”，查看桌面账户实际返回的模型组、日 / 周 / 5 小时限额、已用与剩余百分比，以及补充（重置）时间和倒计时。组内模型共享额度。
+* **真实数据与刷新**：面板打开时每 30 秒更新，也可点击“刷新统计”强制读取。时间按查看设备的时区显示；未提供的周期或数值明确标注，不再展示写死的每日限额和统一重置时间。
+* **当前账户周期说明**：当前桌面返回 Gemini、Claude/GPT 两组的每周与 5 小时配额，未提供独立日限额或请求数 / Token 总上限。读取复用桌面已有的配额服务，不提取登录令牌，也不会打开桌面弹窗或抢占发送焦点。
 
 ### 11. 🌐 固定自定义域名支持 (Cloudflare Zero Trust Named Tunnel)
 * **地址永久不变**：支持绑定 Cloudflare Zero Trust 免费 Token (`CLOUDFLARE_TUNNEL_TOKEN`) 与自定义独立域名 (`CUSTOM_DOMAIN`，如 `https://agent.yourdomain.com`)。
@@ -72,6 +74,8 @@
 ---
 
 ## 🚀 Quick Start
+
+连接中断与消息发送的本轮修复、生效方式和验证范围见 [稳定性修复说明](RELIABILITY.md)。
 
 > 💡 **Tip:** While we recommend starting Antigravity first, the server is now smart enough to wait and automatically connect whenever Antigravity becomes available!
 

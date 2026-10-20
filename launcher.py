@@ -12,6 +12,7 @@ import urllib.request
 import ssl
 import re
 import atexit
+import queue
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -187,6 +188,46 @@ def find_cloudflared_bin():
             return candidate
     return "cloudflared"
 
+def wait_for_tunnel_url(process, timeout=60):
+    """Read the URL with a real deadline, then keep draining the log pipe.
+
+    Stopping reads after the URL fills the child's stdout pipe over time and
+    can freeze an otherwise live tunnel process.
+    """
+    lines = queue.Queue()
+    collecting = threading.Event()
+    collecting.set()
+
+    def drain_output():
+        try:
+            for line in process.stdout:
+                if collecting.is_set():
+                    lines.put(line)
+        finally:
+            process.stdout.close()
+            if collecting.is_set():
+                lines.put(None)
+
+    threading.Thread(target=drain_output, daemon=True, name="cloudflare-log-drain").start()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Timed out waiting for a TryCloudflare URL")
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                raise RuntimeError("Timed out waiting for a TryCloudflare URL") from None
+            if line is None:
+                raise RuntimeError("cloudflared closed its output before providing a URL")
+            match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+            if match:
+                return match.group(0)
+    finally:
+        collecting.clear()
+
+
 def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None, custom_domain=None):
     """
     Starts Cloudflare Tunnel.
@@ -253,36 +294,22 @@ def start_cloudflare_tunnel(cf_bin, addr, protocol, cf_token=None, cf_name=None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 bufsize=1,
                 universal_newlines=True
             )
 
-            start_time = time.time()
-            timeout = 60  # seconds
-            public_url = None
-
-            while time.time() - start_time < timeout:
-                line = cf_process.stdout.readline()
-                if not line:
-                    break
-
-                line_str = line.strip()
-                if "Requesting new quick tunnel" in line_str:
-                    print("   → Requesting tunnel assignment from Cloudflare...", flush=True)
-                elif "Registered tunnel connection" in line_str:
-                    print("   → Edge connection established...", flush=True)
-
-                if ".trycloudflare.com" in line:
-                    match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                    if match:
-                        public_url = match.group(0)
-                        break
-
-            if not public_url:
-                if cf_process.poll() is not None:
-                    raise RuntimeError(f"cloudflared process terminated with code {cf_process.returncode}")
+            try:
+                public_url = wait_for_tunnel_url(cf_process)
+            except Exception:
                 cf_process.terminate()
-                raise RuntimeError("Failed to obtain a TryCloudflare URL within 60s timeout.")
+                try:
+                    cf_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    cf_process.kill()
+                    cf_process.wait(timeout=3)
+                raise
 
             return cf_process, public_url
         except FileNotFoundError:
