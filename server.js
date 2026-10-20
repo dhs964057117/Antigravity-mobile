@@ -184,7 +184,7 @@ async function captureSnapshot(cdp) {
             try {
                 const pos = window.getComputedStyle(el).position;
                 if (pos === 'fixed' || pos === 'absolute') {
-                    if (el.tagName === 'BUTTON' && (el.getAttribute('aria-label') || '').includes('Load older messages')) {
+                    if (el.tagName === 'BUTTON' && (el.getAttribute('aria-label') || '').toLowerCase().includes('older messages')) {
                         return;
                     }
                     el.setAttribute('data-ag-rem', 'true');
@@ -195,8 +195,8 @@ async function captureSnapshot(cdp) {
         // Clone cascade to modify it without affecting the original
         const clone = cascade.cloneNode(true);
         clone.id = 'conversation';
-        clone.classList.remove('theme-light');
-        clone.classList.add('theme-dark', 'antigravity-snapshot-root');
+        clone.classList.remove('theme-light', 'theme-dark');
+        clone.classList.add('antigravity-snapshot-root');
         clone.style.height = 'auto';
         clone.style.minHeight = '100%';
         clone.style.maxHeight = 'none';
@@ -204,18 +204,41 @@ async function captureSnapshot(cdp) {
         clone.style.containerType = 'normal';
         clone.style.paddingRight = '0px';
 
-        const clonedOlderBtn = clone.querySelector('button[aria-label*="Load older messages"]');
+        const clonedOlderBtn = clone.querySelector('button[aria-label*="older messages"], button[aria-label*="Load older messages"]');
         if (clonedOlderBtn) {
             clonedOlderBtn.classList.add('ag-load-older-btn');
             clonedOlderBtn.classList.remove('sr-only', 'opacity-0');
         }
 
-        // Fix container-type: size and max-width on children to prevent collapsing
+        // Clean user messages: remove sticky positioning, bleed classes, and double inner wrappers
+        clone.querySelectorAll('[aria-label="User message"], .sticky, [class*="sticky"]').forEach(el => {
+            el.classList.remove('sticky', 'top-0', 'z-10');
+            el.style.position = 'static';
+            el.style.top = 'auto';
+            el.style.zIndex = '1';
+        });
+
+        clone.querySelectorAll('[class*="md-sticky-message-bleed"]').forEach(el => {
+            const cls = (el.className || '').toString();
+            el.className = cls.replace(/after:[^\s"]+/g, '').replace(/md-sticky-message-bleed/g, '').trim();
+            el.style.position = 'static';
+            el.style.top = 'auto';
+            el.style.background = 'transparent';
+        });
+
+        clone.querySelectorAll('[data-testid="user-input-step"], [class*="group/user-input-step"]').forEach(userStep => {
+            userStep.querySelectorAll('.bg-card, .bg-card-border, [class*="bg-card"], [class*="rounded-xl"], [class*="rounded-[calc"]').forEach(innerCard => {
+                innerCard.classList.remove('bg-card', 'bg-card-border', 'p-px', 'rounded-xl');
+                innerCard.style.background = 'transparent';
+                innerCard.style.border = 'none';
+                innerCard.style.boxShadow = 'none';
+                innerCard.style.padding = '0';
+            });
+        });
+
+        // Neutralize hardcoded theme classes and fix container-type
         clone.querySelectorAll('*').forEach(el => {
-            if (el.classList.contains('theme-light')) {
-                el.classList.remove('theme-light');
-                el.classList.add('theme-dark');
-            }
+            el.classList.remove('theme-light', 'theme-dark');
             el.style.containerType = 'normal';
             if (el.style.maxWidth && el.style.maxWidth.includes('max(')) {
                 el.style.maxWidth = '100%';
@@ -417,13 +440,13 @@ async function captureSnapshot(cdp) {
         const cancelBtn = document.querySelector('#antigravity\\\\.agentSidePanelInputBox button[aria-label*="Cancel (Ctrl+D)"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
         const isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
 
-        const olderBtn = cascade.querySelector('button[aria-label*="Load older messages"]');
+        const olderBtn = cascade.querySelector('button[aria-label*="older messages"], button[aria-label*="Load older messages"]');
         let historyMeta = null;
         if (olderBtn) {
             const label = olderBtn.getAttribute('aria-label') || '';
             const match = label.match(/showing\\s+(\\d+)\\s+of\\s+(\\d+)/i);
             historyMeta = {
-                hasOlder: true,
+                hasOlder: (!label.toLowerCase().includes("no more")),
                 label: label,
                 showing: match ? parseInt(match[1], 10) : null,
                 total: match ? parseInt(match[2], 10) : null
@@ -871,11 +894,15 @@ async function clickElement(cdp, { selector, index, textContent }) {
 // Load older messages (history)
 export async function loadOlderMessages(cdp) {
     const SCRIPT = `(() => {
-        const btn = document.querySelector('button[aria-label*="Load older messages"]');
+        const btn = document.querySelector('button[aria-label*="older messages"], button[aria-label*="Load older messages"]');
         if (btn) {
-            const before = btn.getAttribute('aria-label') || '';
+            const label = btn.getAttribute('aria-label') || '';
+            const isDisabled = btn.getAttribute && btn.getAttribute('aria-disabled') === 'true';
+            if (label.toLowerCase().includes('no more') || isDisabled) {
+                return { success: true, noMore: true, label };
+            }
             btn.click();
-            return { success: true, clicked: true, before };
+            return { success: true, clicked: true, before: label };
         }
         const scrollables = [...document.querySelectorAll('.isolate.overflow-y-auto, [class*="scrollbar-hide"][class*="overflow-y-auto"], #conversation, .overflow-y-auto')];
         for (const el of scrollables) {
@@ -2267,6 +2294,9 @@ export async function createServer() {
     app.post('/load-older-messages', asyncRoute(async (req, res) => {
         if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
         const result = await loadOlderMessages(cdpConnection);
+        if (result && result.clicked) {
+            await new Promise(r => setTimeout(r, 350));
+        }
         lastSnapshot = null;
         lastSnapshotHash = null;
         res.json(result);

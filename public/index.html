@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=4.1">
+    <link rel="stylesheet" href="css/style.css?v=4.3">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self';">
@@ -76,37 +76,21 @@
 
             <!-- Sidebar Bottom Toolbar -->
             <div class="sidebar-footer">
-                <div class="sidebar-theme-switch" id="sidebarThemeSwitch">
-                    <button class="theme-chip" data-theme-val="system" title="跟随系统设置">
-                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                        <span>系统</span>
-                    </button>
-                    <button class="theme-chip" data-theme-val="light" title="浅色模式">
-                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-                        <span>浅色</span>
-                    </button>
-                    <button class="theme-chip" data-theme-val="dark" title="深色模式">
-                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-                        <span>深色</span>
-                    </button>
-                </div>
-                <div class="sidebar-footer-actions">
-                    <button class="footer-btn" id="sidebarUsageBtn" title="查看当前用量与模型限制">
-                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                            <path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path>
-                            <path d="M22 12A10 10 0 0 0 12 2v10z"></path>
-                        </svg>
-                        <span>用量与配额</span>
-                    </button>
-                    <button class="footer-btn" id="sidebarSyncBtn" title="立即同步桌面端状态">
-                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
-                            <path d="M23 4v6h-6"></path>
-                            <path d="M1 20v-6h6"></path>
-                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                        </svg>
-                        <span>同步桌面</span>
-                    </button>
-                </div>
+                <button class="footer-btn" id="sidebarUsageBtn" title="查看当前用量与模型限制">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path>
+                        <path d="M22 12A10 10 0 0 0 12 2v10z"></path>
+                    </svg>
+                    <span>用量与配额</span>
+                </button>
+                <button class="footer-btn" id="sidebarSyncBtn" title="立即同步桌面端状态">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M23 4v6h-6"></path>
+                        <path d="M1 20v-6h6"></path>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                    <span>同步桌面</span>
+                </button>
             </div>
         </aside>
 
@@ -381,7 +365,7 @@
         </div>
     </div>
 
-    <script src="js/app.js?v=4.1"></script>
+    <script src="js/app.js?v=4.3"></script>
 </body>
 
 </html>

@@ -27,7 +27,6 @@ const refreshBtn = document.getElementById('refreshBtn');
 const stopBtn = document.getElementById('stopBtn');
 const headerThemeBtn = document.getElementById('headerThemeBtn');
 const headerThemeIcon = document.getElementById('headerThemeIcon');
-const sidebarThemeSwitch = document.getElementById('sidebarThemeSwitch');
 const historyLoaderBar = document.getElementById('historyLoaderBar');
 const historyLoadMoreBtn = document.getElementById('historyLoadMoreBtn');
 const historyLoaderText = document.getElementById('historyLoaderText');
@@ -166,7 +165,53 @@ ${rawCss || ''}
     margin-bottom: 8px;
 }
 
+/* Deep Theme Support for Antigravity Snapshot */
+[data-theme="light"] #conversation,
+[data-theme="light"] .antigravity-snapshot-root {
+    color-scheme: light !important;
+    --background: #ffffff !important;
+    --foreground: #111827 !important;
+    --card: #f3f4f6 !important;
+    --card-foreground: #111827 !important;
+    --card-border: rgba(0, 0, 0, 0.08) !important;
+    --muted: #f3f4f6 !important;
+    --muted-foreground: #6b7280 !important;
+    --secondary: #f3f4f6 !important;
+    --secondary-foreground: #111827 !important;
+    --border: rgba(0, 0, 0, 0.09) !important;
+    color: #111827 !important;
+    background-color: #ffffff !important;
+}
+
+[data-theme="light"] #conversation p,
+[data-theme="light"] #conversation span,
+[data-theme="light"] #conversation div,
+[data-theme="light"] #conversation h1,
+[data-theme="light"] #conversation h2,
+[data-theme="light"] #conversation h3,
+[data-theme="light"] #conversation h4,
+[data-theme="light"] #conversation li,
+[data-theme="light"] #conversation td,
+[data-theme="light"] #conversation th {
+    color: #111827 !important;
+}
+
+[data-theme="light"] #conversation .text-muted-foreground,
+[data-theme="light"] #conversation [class*="text-muted"] {
+    color: #6b7280 !important;
+}
+
+[data-theme="light"] #conversation .bg-background {
+    background-color: transparent !important;
+}
+
+[data-theme="light"] #conversation .bg-card {
+    background-color: #f3f4f6 !important;
+    color: #111827 !important;
+}
+
 /* --- CANCEL STICKY POSITIONING (Fix user message floating at top) --- */
+#conversation [aria-label="User message"],
 #conversation .sticky,
 #conversation [class*="sticky"],
 #conversation [class*="md-sticky-message-bleed"] {
@@ -212,15 +257,19 @@ ${rawCss || ''}
 }
 
 /* --- REMOVE REDUNDANT INNER BLACK CARD BACKGROUNDS --- */
-#conversation div[class*="group/user-input-step"] .bg-card-border,
-#conversation div[class*="group/user-input-step"] .bg-card,
-#conversation div[class*="group/user-input-step"] [class*="bg-card"],
-#conversation div[class*="group/user-input-step"] div,
-#conversation div[class*="group/user-input-step"] p,
-#conversation div[class*="group/user-input-step"] span {
+#conversation div[data-testid="user-input-step"] *,
+#conversation div[class*="group/user-input-step"] * {
     background: transparent !important;
+    background-color: transparent !important;
     border: none !important;
+    border-color: transparent !important;
     box-shadow: none !important;
+}
+
+#conversation div[data-testid="user-input-step"] [class*="max-h-"],
+#conversation div[class*="group/user-input-step"] [class*="max-h-"] {
+    max-height: none !important;
+    overflow: visible !important;
 }
 
 #conversation div[class*="group/user-input-step"] [data-quotable="true"] {
@@ -362,17 +411,7 @@ function applyTheme(pref, save = true) {
         doc.setAttribute('data-theme-preference', currentThemePref);
     }
 
-    // Update sidebar theme chips
-    const chips = (typeof document !== 'undefined' && document.querySelectorAll) ? document.querySelectorAll('.theme-chip') : [];
-    if (chips && chips.forEach) {
-        chips.forEach(chip => {
-            if (chip.dataset && chip.dataset.themeVal) {
-                if (chip.classList && chip.classList.toggle) {
-                    chip.classList.toggle('active', chip.dataset.themeVal === currentThemePref);
-                }
-            }
-        });
-    }
+
 
     // Update header theme icon
     const headerIcon = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('headerThemeIcon') : null;
@@ -445,7 +484,7 @@ let lastHistoryLoadTime = 0;
 async function requestOlderMessages() {
     if (isLoadingOlderHistory) return;
     const now = Date.now();
-    if (now - lastHistoryLoadTime < 1500) return;
+    if (now - lastHistoryLoadTime < 1200) return;
     isLoadingOlderHistory = true;
     lastHistoryLoadTime = now;
 
@@ -461,14 +500,17 @@ async function requestOlderMessages() {
     try {
         const res = await fetchWithAuth('/load-older-messages', { method: 'POST' });
         if (res.ok) {
-            await loadSnapshot();
-            if (chatContainer) {
-                const newScrollHeight = chatContainer.scrollHeight;
-                const diff = newScrollHeight - prevScrollHeight;
-                if (diff > 0) {
-                    chatContainer.scrollTop = prevScrollTop + diff;
+            const result = await res.json();
+            if (result && result.noMore) {
+                if (historyLoadMoreBtn) {
+                    historyLoadMoreBtn.disabled = true;
+                    historyLoadMoreBtn.style.opacity = '0.6';
+                    historyLoadMoreBtn.style.cursor = 'default';
                 }
+                if (historyLoaderText) historyLoaderText.textContent = '已加载全部历史消息';
+                return;
             }
+            await loadSnapshot(false, { isHistoryLoad: true, prevScrollHeight, prevScrollTop });
         }
     } catch (err) {
         console.error('Failed to load older messages:', err);
@@ -477,7 +519,7 @@ async function requestOlderMessages() {
         if (historyLoadMoreBtn && historyLoadMoreBtn.classList) {
             historyLoadMoreBtn.classList.remove('loading');
         }
-        if (historyLoaderText && origText) {
+        if (historyLoaderText && origText && (!historyLoadMoreBtn || !historyLoadMoreBtn.disabled)) {
             historyLoaderText.textContent = origText;
         }
     }
@@ -862,7 +904,7 @@ function morphDOM(oldRoot, newRoot) {
 // --- Load and Render Chat Snapshot ---
 let snapshotLoading = false;
 let snapshotReload = false;
-async function loadSnapshot(isManual = false) {
+async function loadSnapshot(isManual = false, options = {}) {
     if (snapshotLoading) { snapshotReload = true; return; }
     snapshotLoading = true;
     try {
@@ -920,14 +962,34 @@ async function loadSnapshot(isManual = false) {
         }
 
         // History older messages indicator update
-        if (data.history && data.history.hasOlder) {
+        if (data.history) {
             if (historyLoaderBar) {
                 historyLoaderBar.style.display = 'flex';
-                if (historyLoaderText) {
-                    if (data.history.showing && data.history.total) {
-                        historyLoaderText.textContent = `加载更早历史消息 (已显示 ${data.history.showing}/${data.history.total})`;
-                    } else {
-                        historyLoaderText.textContent = '加载更早历史消息';
+                if (data.history.hasOlder) {
+                    if (historyLoadMoreBtn) {
+                        historyLoadMoreBtn.disabled = false;
+                        historyLoadMoreBtn.style.opacity = '1';
+                        historyLoadMoreBtn.style.cursor = 'pointer';
+                    }
+                    if (historyLoaderText) {
+                        if (data.history.showing && data.history.total) {
+                            historyLoaderText.textContent = `加载更早历史消息 (已显示 ${data.history.showing}/${data.history.total})`;
+                        } else {
+                            historyLoaderText.textContent = '加载更早历史消息';
+                        }
+                    }
+                } else {
+                    if (historyLoadMoreBtn) {
+                        historyLoadMoreBtn.disabled = true;
+                        historyLoadMoreBtn.style.opacity = '0.6';
+                        historyLoadMoreBtn.style.cursor = 'default';
+                    }
+                    if (historyLoaderText) {
+                        if (data.history.showing && data.history.total) {
+                            historyLoaderText.textContent = `已加载全部历史消息 (${data.history.showing}/${data.history.total})`;
+                        } else {
+                            historyLoaderText.textContent = '已显示全部历史消息';
+                        }
                     }
                 }
             }
@@ -961,13 +1023,17 @@ async function loadSnapshot(isManual = false) {
 
         // Scroll positioning
         const newScrollHeight = chatContainer.scrollHeight;
-        if (isUserScrollLocked) {
+        if (options && options.isHistoryLoad) {
+            const diff = newScrollHeight - (options.prevScrollHeight || 0);
+            chatContainer.scrollTop = (options.prevScrollTop || 0) + (diff > 0 ? diff : 0);
+            userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
+        } else if (wasEmpty) {
+            chatContainer.scrollTop = newScrollHeight;
+        } else if (isUserScrollLocked) {
             const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
             chatContainer.scrollTop = newScrollHeight * scrollPercent;
-        } else if (isNearBottom || scrollPos === 0) {
-            if (newScrollHeight > scrollHeight || scrollPos === 0) {
-                chatContainer.scrollTop = newScrollHeight;
-            }
+        } else if (isNearBottom) {
+            chatContainer.scrollTop = newScrollHeight;
         } else {
             chatContainer.scrollTop = scrollPos;
         }
@@ -1865,7 +1931,7 @@ chatContainer.addEventListener('scroll', () => {
     clearTimeout(idleTimer);
 
     // Auto pull older messages when scrolled to the very top
-    if (chatContainer.scrollTop <= 30 && historyLoaderBar && historyLoaderBar.style.display !== 'none') {
+    if (chatContainer.scrollTop <= 30 && historyLoaderBar && historyLoaderBar.style.display !== 'none' && (!historyLoadMoreBtn || !historyLoadMoreBtn.disabled)) {
         requestOlderMessages();
     }
 

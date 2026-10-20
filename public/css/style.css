@@ -171,8 +171,8 @@ html, body {
 .brand-logo {
     width: 28px;
     height: 28px;
-    background: #1e1e1e;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: var(--radius-md);
     display: flex;
     align-items: center;
@@ -259,8 +259,8 @@ html, body {
 /* Sidebar Search Box */
 .sidebar-search-box {
     margin: 4px 14px 10px;
-    background: #212121;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: var(--radius-md);
     padding: 7px 10px;
     display: flex;
@@ -271,8 +271,8 @@ html, body {
 }
 
 .sidebar-search-box:focus-within {
-    border-color: rgba(255, 255, 255, 0.2);
-    background: #262626;
+    border-color: var(--border-active);
+    background: var(--bg-card-hover);
 }
 
 .sidebar-search-box svg {
@@ -516,53 +516,9 @@ html, body {
     padding: 10px 14px;
     border-top: 1px solid var(--border-subtle);
     display: flex;
-    flex-direction: column;
     gap: 8px;
     flex-shrink: 0;
     background: var(--sidebar-footer-bg);
-}
-
-/* Sidebar Theme Switcher */
-.sidebar-theme-switch {
-    display: flex;
-    gap: 4px;
-    background: var(--bg-card);
-    padding: 3px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-}
-
-.theme-chip {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    padding: 5px 8px;
-    font-size: 11.5px;
-    font-weight: 500;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-}
-
-.theme-chip:hover {
-    color: var(--text-main);
-}
-
-.theme-chip.active {
-    background: var(--bg-panel);
-    color: var(--text-main);
-    font-weight: 600;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-}
-
-.sidebar-footer-actions {
-    display: flex;
-    gap: 8px;
 }
 
 .footer-btn {
@@ -965,9 +921,9 @@ html, body {
 }
 
 .fab:hover {
-    background: #262626;
-    border-color: rgba(255, 255, 255, 0.2);
-    color: #fff;
+    background: var(--bg-card-hover);
+    border-color: var(--border-active);
+    color: var(--text-main);
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
 }
@@ -1290,8 +1246,8 @@ html, body {
 .codex-welcome-avatar {
     width: 44px;
     height: 44px;
-    background: #1e1e1e;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -1318,8 +1274,8 @@ html, body {
 }
 
 .codex-suggestion-card {
-    background: #1e1e1e;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 12px;
     padding: 14px 16px;
     text-align: left;
@@ -1331,8 +1287,8 @@ html, body {
 }
 
 .codex-suggestion-card:hover {
-    background: #262626;
-    border-color: rgba(255, 255, 255, 0.16);
+    background: var(--bg-card-hover);
+    border-color: var(--border-active);
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
@@ -1379,8 +1335,8 @@ html, body {
     align-items: center !important;
     justify-content: space-between !important;
     height: 36px !important;
-    background: #1e1e1e !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    background: var(--bg-code-header) !important;
+    border-bottom: 1px solid var(--border-code) !important;
     padding: 0 14px !important;
     user-select: none !important;
 }
@@ -2266,4 +2222,88 @@ html, body {
     opacity: 0;
     transform: translateY(-12px) scale(0.95);
     pointer-events: none;
+}
+
+/* ============================================================
+   LIGHT THEME ENHANCEMENTS & CODEX CHAT BUBBLE CLEANUP
+   ============================================================ */
+[data-theme="light"] .send-btn {
+    background: #e5e7eb;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    color: #6b7280;
+}
+
+[data-theme="light"] .send-btn.has-text {
+    background: #111827;
+    color: #ffffff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="light"] .input-card textarea::placeholder {
+    color: #9ca3af;
+}
+
+[data-theme="light"] .modal-card {
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.12);
+}
+
+/* --- CANCEL STICKY POSITIONING (Fix user message floating at top) --- */
+#conversation [aria-label="User message"],
+#conversation .sticky,
+#conversation [class*="sticky"],
+#conversation [class*="md-sticky-message-bleed"] {
+    position: static !important;
+    top: auto !important;
+    z-index: 1 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin-bottom: 0 !important;
+}
+
+#conversation [class*="md-sticky-message-bleed"]::before,
+#conversation [class*="md-sticky-message-bleed"]::after {
+    display: none !important;
+}
+
+/* --- SINGLE CLEAN USER MESSAGE BUBBLE --- */
+#conversation div[data-testid="user-input-step"],
+#conversation div[class*="group/user-input-step"] {
+    background: var(--bg-user-bubble) !important;
+    color: var(--text-user-bubble) !important;
+    border-radius: 18px !important;
+    border: 1px solid var(--border-user-bubble) !important;
+    padding: 12px 18px !important;
+    margin: 14px 0 !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06) !important;
+    max-width: 82% !important;
+    margin-left: auto !important;
+    width: fit-content !important;
+    position: static !important;
+}
+
+/* Remove redundant inner card backgrounds, borders and padding */
+#conversation div[data-testid="user-input-step"] *,
+#conversation div[class*="group/user-input-step"] * {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    border-color: transparent !important;
+    box-shadow: none !important;
+}
+
+#conversation div[data-testid="user-input-step"] [data-quotable="true"],
+#conversation div[class*="group/user-input-step"] [data-quotable="true"] {
+    color: var(--text-user-bubble) !important;
+    font-size: 14.5px !important;
+    line-height: 1.6 !important;
+    background: transparent !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+}
+
+#conversation div[data-testid="user-input-step"] [class*="max-h-"],
+#conversation div[class*="group/user-input-step"] [class*="max-h-"] {
+    max-height: none !important;
+    overflow: visible !important;
 }
